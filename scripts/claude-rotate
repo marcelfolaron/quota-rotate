@@ -67,6 +67,21 @@ prompt=""
 handoff="$BASE/handoff.$$.json"
 trap 'rm -f "$handoff"' EXIT
 
+# An account with no reading would rank as empty. Before the first pick, give each
+# such account one headless turn so its reading exists (about 5 s each, once ever).
+if [ -z "$account" ] && [ "${QUOTA_ROTATE_NO_PROBE:-0}" != "1" ]; then
+  unknown="$(node -e '
+    const fs=require("fs"),path=require("path"); const base=process.argv[1];
+    const r=JSON.parse(fs.readFileSync(path.join(base,"accounts.json"),"utf8"));
+    const have=new Set(); const dir=path.join(base,"usage");
+    if (fs.existsSync(dir)) for (const f of fs.readdirSync(dir)) if (f.endsWith(".json")) { try { const u=JSON.parse(fs.readFileSync(path.join(dir,f),"utf8")); if (Object.keys(u.windows||{}).length) have.add(u.account) } catch {} }
+    console.log(Object.entries(r.accounts).filter(([n,a])=>a.enabled!==false && !have.has(n)).map(([n])=>n).join(" "))' "$BASE")"
+  for name in $unknown; do
+    echo "claude-rotate: no reading for $name yet, probing…" >&2
+    "$HERE/quota-accounts" probe "$name" >/dev/null 2>&1 || echo "claude-rotate: probe of $name failed" >&2
+  done
+fi
+
 while :; do
   if [ -z "$account" ]; then
     account="$(pick "" || true)"

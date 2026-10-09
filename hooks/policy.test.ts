@@ -7,8 +7,10 @@ import {
   clampThreshold,
   effectivePercent,
   formatReset,
+  isStale,
   matchAccount,
   pickNext,
+  probeArgv,
   rankCandidates,
 } from './policy'
 
@@ -119,6 +121,27 @@ describe('identity and formatting', () => {
     // One entry without an org on record matches by email alone.
     expect(matchAccount(accounts, { email: 'other@x.io', orgId: 'whatever' })).toBe('other')
     expect(matchAccount(accounts, { email: 'nobody@x.io' })).toBeUndefined()
+  })
+
+  test('a reading is stale when missing or older than the limit', async () => {
+    const fresh = reading('a', { five_hour: { percentUsed: 1 } })
+    expect(isStale(undefined, NOW, 1000)).toBe(true)
+    expect(isStale({ ...fresh, windows: {} }, NOW, 1000)).toBe(true)
+    expect(isStale(fresh, NOW, 120_000)).toBe(false)
+    expect(isStale(fresh, NOW, 30_000)).toBe(true)
+  })
+
+  test('a probe unsets the launcher variables and sets the config dir only for a non-default account', async () => {
+    const forWork = probeArgv('work', '/x/work', '/plug')
+    expect(forWork.slice(0, 1)).toEqual(['env'])
+    expect(forWork).toContain('-u')
+    expect(forWork).toContain('QUOTA_ROTATE_HANDOFF')
+    expect(forWork).toContain('CLAUDE_CONFIG_DIR=/x/work')
+    expect(forWork).toContain('QUOTA_ROTATE_PROBE=1')
+    expect(forWork).toContain('CLAUDE_CODE_PLUGIN_DIRS=/plug')
+    const forDefault = probeArgv('default', undefined, '/plug')
+    expect(forDefault.some(a => a.startsWith('CLAUDE_CONFIG_DIR='))).toBe(false)
+    expect(forDefault.indexOf('-p')).toBeGreaterThan(forDefault.indexOf('claude'))
   })
 
   test('clamps the threshold and formats resets', async () => {

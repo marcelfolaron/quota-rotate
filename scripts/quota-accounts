@@ -7,6 +7,7 @@
 #   quota-accounts add default     register ~/.claude itself
 #   quota-accounts list            show accounts and their last reading
 #   quota-accounts refresh         re-read email/org of every account from its login
+#   quota-accounts probe [name]    one-line headless run per account so each writes its reading
 #   quota-accounts remove <name>   forget it (keeps the directory)
 set -euo pipefail
 
@@ -79,6 +80,24 @@ case "${1:-}" in
     write_registry "$name" "$dir" "$status"
     echo "Registered '$name' -> $dir"
     node -e 'const s=JSON.parse(process.argv[1]); console.log("  " + [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · "))' "$status"
+    ;;
+  probe)
+    PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    names="${2:-}"
+    [ -n "$names" ] || names="$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(Object.entries(r.accounts).filter(([,a])=>a.enabled!==false).map(([n])=>n).join(" "))' "$REG")"
+    for name in $names; do
+      printf 'probing %s… ' "$name"
+      cfg=()
+      [ "$name" = "default" ] || cfg=("CLAUDE_CONFIG_DIR=$BASE/$name")
+      if (cd "$HOME" && env -u CLAUDE_CONFIG_DIR -u QUOTA_ROTATE_HANDOFF -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY \
+            ${cfg[@]+"${cfg[@]}"} QUOTA_ROTATE_ACCOUNT="$name" QUOTA_ROTATE_PROBE=1 CLAUDE_CODE_PLUGIN_DIRS="$PLUGIN_DIR" \
+            "$CLAUDE" -p "Reply with the single word ok." --model haiku --setting-sources user >/dev/null 2>&1); then
+        echo "ok"
+      else
+        echo "FAILED (not logged in?)"
+      fi
+    done
+    "$0" list
     ;;
   refresh)
     for name in $(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(Object.keys(r.accounts).join(" "))' "$REG"); do

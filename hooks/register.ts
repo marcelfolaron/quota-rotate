@@ -18,8 +18,11 @@ import {
   formatAge,
   formatReset,
   hasReading,
+  isStale,
   matchAccount,
   pickNext,
+  probeArgv,
+  PROBE_AFTER_MS,
   rankCandidates,
   windowLabel,
 } from './policy'
@@ -28,6 +31,9 @@ const PANE = 'quota'
 const REFRESH_MS = 60_000
 const NAG_MS = 10 * 60_000
 const EXIT_DELAY_MS = 750
+const PROBE_TIMEOUT_MS = 120_000
+/** Before a handoff, a target's reading older than this is refreshed first. */
+const PROBE_BEFORE_SWITCH_MS = 3_600_000
 
 const snapshot = atom({ plugin: 'quota-rotate', key: 'snapshot' } as const, {})
 const registry = atom({ plugin: 'quota-rotate', key: 'registry' } as const, {})
@@ -38,12 +44,18 @@ type Identity = {
   baseDir: string
   handoffPath: string | undefined
   switchAt: number
+  /** A headless probe run: record only, never probe, switch or draw. */
+  isProbe: boolean
+  isInteractive: boolean
 }
 
-let identity: Identity = { me: 'default', configDir: '', baseDir: '', handoffPath: undefined, switchAt: 95 }
+let identity: Identity = {
+  me: 'default', configDir: '', baseDir: '', handoffPath: undefined, switchAt: 95, isProbe: false, isInteractive: false,
+}
 let isIdentified = false
 let isSwitching = false
 let lastNagAt = 0
+const probing = new Set<string>()
 
 function parseJson<T>(text: string): T | undefined {
   try {
@@ -134,6 +146,51 @@ async function identify($: EngineInterface): Promise<void> {
   }
 }
 
+function configDirOf(account: string, accounts: Record<string, RegistryAccount>, home: string): string | undefined {
+  const dir = accounts[account]?.configDir
+  if (dir === undefined || dir === `${home}/.claude`) return undefined
+  return dir
+}
+
+/** Runs one headless turn under `account`; that account's mod writes its reading, then we re-read. */
+async function probe($: EngineInterface, account: string): Promise<boolean> {
+  if (identity.isProbe || probing.has(account) || account === identity.me) return false
+  const accounts = await read($, registry)
+  if (!(account in accounts)) return false
+  probing.add(account)
+  $.ui.status(`probing ${account}…`)
+  try {
+    const home = (await $.env.get('HOME')) ?? ''
+    const ran = await $.process.run(probeArgv(account, configDirOf(account, accounts, home), $.plugin.root), {
+      cwd: home,
+      timeoutMs: PROBE_TIMEOUT_MS,
+    })
+    if (ran.exitCode !== 0) {
+      $.ui.log(`probe of ${account} exited ${ran.exitCode}: ${(ran.stderr || ran.stdout).trim().slice(0, 200)}`)
+    }
+    await refreshSnapshot($)
+    return ran.exitCode === 0
+  } catch (error) {
+    $.ui.log(`probe of ${account} failed: ${String(error).slice(0, 200)}`)
+    return false
+  } finally {
+    probing.delete(account)
+    $.ui.status(undefined)
+  }
+}
+
+/** Probes every other registered account whose reading is missing or older than `maxAgeMs`, one at a time. */
+async function probeStale($: EngineInterface, maxAgeMs: number): Promise<void> {
+  if (identity.isProbe || !identity.isInteractive) return
+  const nowMs = await $.clock.now()
+  const snap = await read($, snapshot)
+  const accounts = await read($, registry)
+  for (const account of Object.keys(accounts)) {
+    if (account === identity.me || accounts[account]?.enabled === false) continue
+    if (isStale(snap[account], nowMs, maxAgeMs)) await probe($, account)
+  }
+}
+
 function myPercent(snap: Snapshot, nowMs: number): number {
   return bindingPercent(snap[identity.me], nowMs)
 }
@@ -171,15 +228,23 @@ async function switchTo($: EngineInterface, to: string, reason: Handoff['reason'
 }
 
 async function maybeSwitch($: EngineInterface, reason: Handoff['reason'], isForced: boolean): Promise<void> {
-  if (isSwitching) return
-  const nowMs = await $.clock.now()
-  const snap = await read($, snapshot)
+  if (isSwitching || identity.isProbe) return
+  let nowMs = await $.clock.now()
+  let snap = await read($, snapshot)
   const mine = myPercent(snap, nowMs)
   if (!isForced && mine < identity.switchAt) {
     $.ui.status(mine >= 70 ? `${identity.me} at ${mine}% (switches at ${identity.switchAt}%)` : undefined)
     return
   }
-  const to = pickNext(snap, await read($, registry), identity.me, nowMs, identity.switchAt)
+  const accounts = await read($, registry)
+  let to = pickNext(snap, accounts, identity.me, nowMs, identity.switchAt)
+  // A target chosen on a stale or missing reading is checked first: a probe is 5 s, a wrong handoff is a loop.
+  if (to !== undefined && isStale(snap[to], nowMs, PROBE_BEFORE_SWITCH_MS)) {
+    await probe($, to)
+    nowMs = await $.clock.now()
+    snap = await read($, snapshot)
+    to = pickNext(snap, accounts, identity.me, nowMs, identity.switchAt)
+  }
   if (to === undefined) {
     if (nowMs - lastNagAt > NAG_MS) {
       lastNagAt = nowMs
@@ -203,12 +268,15 @@ export const register: Register = (on, options) => {
       baseDir: `${home}/${BASE_DIR_NAME}`,
       handoffPath: await $.env.get('QUOTA_ROTATE_HANDOFF'),
       me: accountNameOf({ account: await $.env.get('QUOTA_ROTATE_ACCOUNT'), configDir, home }),
+      isProbe: (await $.env.get('QUOTA_ROTATE_PROBE')) === '1',
+      isInteractive: e.isInteractive,
     }
     await loadRegistry($)
     await refreshSnapshot($)
     await identify($)
     const live = await $.session.usage()
     if (live.rateLimits.length > 0) await record($, live.rateLimits)
+    if (identity.isProbe) return next(e)
 
     $.clock.every(REFRESH_MS, () => {
       void (async () => {
@@ -216,7 +284,12 @@ export const register: Register = (on, options) => {
         await refreshSnapshot($)
         // The registry can appear or grow after this session started (quota-accounts add).
         if (!isIdentified && Object.keys(await read($, registry)).length > 0) await identify($)
+        await probeStale($, PROBE_AFTER_MS)
       })()
+    })
+    // Readings the other accounts lack: fetched shortly after start, off the start path.
+    $.clock.after(3_000, () => {
+      void probeStale($, PROBE_AFTER_MS)
     })
 
     try {
@@ -224,6 +297,11 @@ export const register: Register = (on, options) => {
       await $.command.register({
         name: 'quota-switch',
         description: 'Move this session to another account (the emptiest when none is named)',
+        argumentHint: '[account]',
+      })
+      await $.command.register({
+        name: 'quota-probe',
+        description: 'Refresh the other accounts\' readings with a one-line headless run each',
         argumentHint: '[account]',
       })
     } catch (error) {
@@ -253,6 +331,16 @@ export const register: Register = (on, options) => {
     if (wanted && !(wanted in accounts) && !(wanted in snap)) return { text: `Unknown account ${wanted}.` }
     await switchTo($, to, 'manual')
     return { text: `Switching to ${to}.` }
+  })
+
+  on('command.run', { command: 'quota-probe' }, async ($, e) => {
+    const wanted = e.args.trim()
+    if (wanted) {
+      const ok = await probe($, wanted)
+      return { text: ok ? `Probed ${wanted}.` : `Could not probe ${wanted}.` }
+    }
+    await probeStale($, 0)
+    return { text: 'Probed every other account.' }
   })
 
   on('session.measure', async ($, e, next) => {
@@ -326,7 +414,9 @@ export const register: Register = (on, options) => {
             Text({ color: colorOf(percent), children: [bar(percent, width)] }),
             Text({ children: [`${String(percent).padStart(3)}%`] }),
             Text({ dimColor: true, children: [reset ? `resets ${reset}` : ''] }),
-            ...(i === 0 ? [Text({ dimColor: true, children: [formatAge(usage!.observedAt, nowMs)] })] : []),
+            ...(i === 0
+              ? [Text({ dimColor: true, color: isStale(usage, nowMs, PROBE_AFTER_MS) ? 'warning' : undefined, children: [formatAge(usage!.observedAt, nowMs)] })]
+              : []),
           ],
         })
       })
@@ -365,6 +455,16 @@ export const register: Register = (on, options) => {
               plain: true,
               onPress: async () => {
                 await refreshSnapshot($)
+              },
+            }),
+            Button({
+              key: 'probe',
+              label: probing.size > 0 ? `Probing ${[...probing].join(', ')}…` : 'Probe others',
+              hotkey: 'p',
+              plain: true,
+              dimColor: probing.size > 0,
+              onPress: async () => {
+                await probeStale($, 0)
               },
             }),
             Button({

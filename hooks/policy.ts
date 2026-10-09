@@ -96,6 +96,33 @@ export function matchAccount(
   return undefined
 }
 
+/** Six hours: a reading older than this is refreshed with a probe before it is trusted. */
+export const PROBE_AFTER_MS = 6 * 3_600_000
+
+/** True when the account has no reading, or one older than `maxAgeMs`. */
+export function isStale(usage: AccountUsage | undefined, nowMs: number, maxAgeMs: number): boolean {
+  if (!hasReading(usage)) return true
+  const observed = Date.parse(usage!.observedAt)
+  return !Number.isFinite(observed) || nowMs - observed > maxAgeMs
+}
+
+/**
+ * The argv of a probe: a one-line headless run under `account` with this mod loaded, so that
+ * account's own mod instance writes its reading. `env -u` first, so the launcher's variables and
+ * an explicit ~/.claude never leak into the probe (the primary's Keychain entry is keyed to NO variable).
+ */
+export function probeArgv(account: string, configDir: string | undefined, pluginRoot: string): string[] {
+  return [
+    'env',
+    '-u', 'CLAUDE_CONFIG_DIR', '-u', 'QUOTA_ROTATE_HANDOFF', '-u', 'CLAUDE_CODE_OAUTH_TOKEN', '-u', 'ANTHROPIC_API_KEY',
+    ...(configDir !== undefined ? [`CLAUDE_CONFIG_DIR=${configDir}`] : []),
+    `QUOTA_ROTATE_ACCOUNT=${account}`,
+    'QUOTA_ROTATE_PROBE=1',
+    `CLAUDE_CODE_PLUGIN_DIRS=${pluginRoot}`,
+    'claude', '-p', 'Reply with the single word ok.', '--model', 'haiku', '--setting-sources', 'user',
+  ]
+}
+
 export function clampThreshold(value: unknown, fallback = 95): number {
   const n = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(n)) return fallback

@@ -70,11 +70,28 @@ account without installing it per config dir.
 - Outside the launcher (plain `claude`), it still records and shows usage and tells
   you to `/login` yourself when a switch would be due.
 
+## Probes
+
+An account that has not run a session has no reading, and claude.ai web use on an idle
+account is invisible. So the mod refreshes readings with a **probe**: a one-line
+headless run (`claude -p "Reply with the single word ok." --model haiku`) under that
+account with the mod loaded, so that account's own mod instance writes its file. About
+5 s and one tiny Haiku request each.
+
+- The running session probes every other account whose reading is missing or older
+  than 6 h, shortly after start and then on its minute tick.
+- Before a handoff, a target chosen on a reading older than 1 h is probed first.
+- `/quota-probe [account]` and the pane's `p` button probe on demand;
+  `quota-accounts probe [name]` does the same from the shell.
+- `cr` probes accounts with no reading before its first pick
+  (`QUOTA_ROTATE_NO_PROBE=1` skips that).
+
 ## Limits and known gaps
 
 - An idle account's reading ages. A passed `resetsAt` counts as 0, but claude.ai web
   use on that account is invisible until a session runs there.
-- An account with no reading ranks as empty. Its first turn corrects that.
+- Between probes an idle account's reading can be up to 6 h old; the pane colors the
+  age when a reading is older than that.
 - `session.usage().rateLimits` is empty off a subscription; Console or API-key logins
   are not tracked.
 - The handoff exits with `/exit` through the mods API. If the engine refuses that
