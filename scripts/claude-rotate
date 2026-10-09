@@ -87,7 +87,7 @@ while :; do
   if [ -n "$session" ]; then
     args+=(--resume "$session")
   elif [ ${#first[@]} -gt 0 ]; then
-    args+=("${first[@]}")
+    args+=(${first[@]+"${first[@]}"})
     first=()
   fi
   [ -n "$prompt" ] && args+=("$prompt")
@@ -96,11 +96,11 @@ while :; do
   config_env=()
   if [ "$account" != "default" ]; then config_env=("CLAUDE_CONFIG_DIR=$dir"); fi
   set +e
-  env -u CLAUDE_CONFIG_DIR "${config_env[@]}" \
+  env -u CLAUDE_CONFIG_DIR ${config_env[@]+"${config_env[@]}"} \
     QUOTA_ROTATE_ACCOUNT="$account" \
     QUOTA_ROTATE_HANDOFF="$handoff" \
     CLAUDE_CODE_PLUGIN_DIRS="$PLUGIN_DIR${CLAUDE_CODE_PLUGIN_DIRS:+:$CLAUDE_CODE_PLUGIN_DIRS}" \
-    "$CLAUDE" "${args[@]}" "${rest[@]}"
+    "$CLAUDE" ${args[@]+"${args[@]}"} ${rest[@]+"${rest[@]}"}
   status=$?
   set -e
 
