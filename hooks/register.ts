@@ -109,19 +109,28 @@ async function record($: EngineInterface, limits: readonly SessionRateLimit[]): 
 async function identify($: EngineInterface): Promise<void> {
   try {
     const ran = await $.process.run(['claude', 'auth', 'status', '--json'], { timeoutMs: 20_000 })
-    if (ran.exitCode !== 0) return
+    if (ran.exitCode !== 0) {
+      $.ui.log(`auth status exited ${ran.exitCode}: ${(ran.stderr || ran.stdout).trim().slice(0, 160)}`)
+      return
+    }
     const status = parseJson<{ email?: string; orgId?: string }>(ran.stdout)
-    if (!status?.email) return
+    if (!status?.email) {
+      $.ui.log(`auth status gave no email: ${ran.stdout.trim().slice(0, 160)}`)
+      return
+    }
     const accounts = await read($, registry)
     const match = matchAccount(accounts, status)
-    if (match === undefined) return
+    if (match === undefined) {
+      $.ui.log(`login ${status.email} (org ${status.orgId ?? '?'}) matches no registered account; tracking as ${identity.me}`)
+      return
+    }
     isIdentified = true
     if (match !== identity.me) {
       $.ui.log(`login is ${match} (${status.email}); tracking that account`)
       identity = { ...identity, me: match }
     }
   } catch (error) {
-    $.ui.log(`could not read auth status: ${String(error)}`, { to: 'debug' })
+    $.ui.log(`could not run claude auth status: ${String(error).slice(0, 200)}`)
   }
 }
 
