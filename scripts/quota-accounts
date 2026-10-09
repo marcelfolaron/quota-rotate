@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# quota-accounts: register the Claude accounts claude-rotate can launch under.
+#
+#   quota-accounts add <name>      create ~/.claude-accounts/<name>, share the
+#                                  primary's projects/plugins/skills/settings,
+#                                  then log that account in (browser)
+#   quota-accounts add default     register ~/.claude itself
+#   quota-accounts list            show accounts and their last reading
+#   quota-accounts remove <name>   forget it (keeps the directory)
+set -euo pipefail
+
+BASE="${QUOTA_ROTATE_BASE:-$HOME/.claude-accounts}"
+PRIMARY="$HOME/.claude"
+# A terminal wrapper on PATH (cmux ships one) injects flags before subcommands;
+# CLAUDE_BIN names the real binary when that gets in the way.
+CLAUDE="${CLAUDE_BIN:-claude}"
+REG="$BASE/accounts.json"
+SHARED=(projects plugins skills commands agents settings.json CLAUDE.md keybindings.json)
+
+mkdir -p "$BASE/usage"
+[ -f "$REG" ] || printf '{ "version": 1, "accounts": {} }\n' >"$REG"
+
+config_dir_of() {
+  if [ "$1" = "default" ]; then printf '%s\n' "$PRIMARY"; else printf '%s\n' "$BASE/$1"; fi
+}
+
+write_registry() { # write_registry <name> <dir> <status-json>
+  node -e '
+    const fs = require("fs");
+    const [reg, name, dir, statusJson] = process.argv.slice(1);
+    const r = JSON.parse(fs.readFileSync(reg, "utf8"));
+    const s = statusJson ? JSON.parse(statusJson) : {};
+    r.accounts[name] = {
+      ...(r.accounts[name] || {}),
+      configDir: dir,
+      ...(s.email ? { email: s.email } : {}),
+      ...(s.orgName ? { orgName: s.orgName } : {}),
+      ...(s.subscriptionType ? { subscriptionType: s.subscriptionType } : {}),
+      enabled: true,
+    };
+    fs.writeFileSync(reg, JSON.stringify(r, null, 2) + "\n");
+  ' "$REG" "$1" "$2" "${3:-}"
+}
+
+case "${1:-}" in
+  add)
+    name="${2:?quota-accounts add <name>}"
+    case "$name" in *[!a-zA-Z0-9_-]*) echo "name must be letters, digits, - or _" >&2; exit 2;; esac
+    dir="$(config_dir_of "$name")"
+    if [ "$name" != "default" ]; then
+      mkdir -p "$dir"
+      for item in "${SHARED[@]}"; do
+        if [ -e "$PRIMARY/$item" ] && [ ! -e "$dir/$item" ]; then
+          ln -s "$PRIMARY/$item" "$dir/$item"
+        fi
+      done
+    fi
+    if CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth status >/dev/null 2>&1; then
+      echo "'$name' is already logged in at $dir; keeping that login (run 'claude auth logout' there to change it)"
+    else
+      echo "Logging in for account '$name' (a browser window opens; pick the right claude.ai account)..."
+      CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth login
+    fi
+    status="$(CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth status --json 2>/dev/null || echo '{}')"
+    write_registry "$name" "$dir" "$status"
+    echo "Registered '$name' -> $dir"
+    node -e 'const s=JSON.parse(process.argv[1]); console.log("  " + [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · "))' "$status"
+    ;;
+  list)
+    node -e '
+      const fs = require("fs"), path = require("path");
+      const base = process.argv[1];
+      const r = JSON.parse(fs.readFileSync(path.join(base, "accounts.json"), "utf8"));
+      const usage = {};
+      const dir = path.join(base, "usage");
+      if (fs.existsSync(dir)) for (const f of fs.readdirSync(dir)) if (f.endsWith(".json")) {
+        try { const u = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")); usage[u.account] = u; } catch {}
+      }
+      for (const [name, a] of Object.entries(r.accounts)) {
+        const u = usage[name];
+        const windows = u ? Object.entries(u.windows).map(([k, w]) => {
+          const reset = w.resetsAt && Date.parse(w.resetsAt) <= Date.now();
+          return `${k}=${reset ? 0 : w.percentUsed}%`;
+        }).join(" ") : "no reading";
+        console.log(`${name.padEnd(12)} ${(a.email || "").padEnd(28)} ${windows}${u ? "  (" + u.observedAt + ")" : ""}`);
+      }
+    ' "$BASE"
+    ;;
+  remove)
+    name="${2:?quota-accounts remove <name>}"
+    node -e '
+      const fs = require("fs"); const [reg, name] = process.argv.slice(1);
+      const r = JSON.parse(fs.readFileSync(reg, "utf8")); delete r.accounts[name];
+      fs.writeFileSync(reg, JSON.stringify(r, null, 2) + "\n");
+    ' "$REG" "$name"
+    echo "Removed '$name' from the registry (directory kept)."
+    ;;
+  *)
+    sed -n '2,10p' "$0"
+    exit 2
+    ;;
+esac
