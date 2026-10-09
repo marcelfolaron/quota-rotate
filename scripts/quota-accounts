@@ -6,6 +6,7 @@
 #                                  then log that account in (browser)
 #   quota-accounts add default     register ~/.claude itself
 #   quota-accounts list            show accounts and their last reading
+#   quota-accounts refresh         re-read email/org of every account from its login
 #   quota-accounts remove <name>   forget it (keeps the directory)
 set -euo pipefail
 
@@ -34,6 +35,7 @@ write_registry() { # write_registry <name> <dir> <status-json>
       ...(r.accounts[name] || {}),
       configDir: dir,
       ...(s.email ? { email: s.email } : {}),
+      ...(s.orgId ? { orgId: s.orgId } : {}),
       ...(s.orgName ? { orgName: s.orgName } : {}),
       ...(s.subscriptionType ? { subscriptionType: s.subscriptionType } : {}),
       enabled: true,
@@ -66,6 +68,14 @@ case "${1:-}" in
     echo "Registered '$name' -> $dir"
     node -e 'const s=JSON.parse(process.argv[1]); console.log("  " + [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · "))' "$status"
     ;;
+  refresh)
+    for name in $(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(Object.keys(r.accounts).join(" "))' "$REG"); do
+      dir="$(config_dir_of "$name")"
+      status="$(CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth status --json 2>/dev/null || echo '{}')"
+      write_registry "$name" "$dir" "$status"
+      node -e 'const s=JSON.parse(process.argv[2]); console.log(process.argv[1].padEnd(16) + (s.loggedIn ? [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · ") : "NOT logged in"))' "$name" "$status"
+    done
+    ;;
   list)
     node -e '
       const fs = require("fs"), path = require("path");
@@ -82,7 +92,7 @@ case "${1:-}" in
           const reset = w.resetsAt && Date.parse(w.resetsAt) <= Date.now();
           return `${k}=${reset ? 0 : w.percentUsed}%`;
         }).join(" ") : "no reading";
-        console.log(`${name.padEnd(12)} ${(a.email || "").padEnd(28)} ${windows}${u ? "  (" + u.observedAt + ")" : ""}`);
+        console.log(`${name.padEnd(16)} ${(a.email || "").padEnd(24)} ${(a.orgName || "").slice(0, 24).padEnd(24)} ${windows}${u ? "  (" + u.observedAt + ")" : ""}`);
       }
     ' "$BASE"
     ;;

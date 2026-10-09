@@ -4,6 +4,9 @@
 # account with the same session resumed.
 #
 #   claude-rotate [--account NAME] [claude args...]
+#   claude-rotate --resume            session picker, under the emptiest account
+#   claude-rotate -r <id|name>        resume that session
+#   claude-rotate --continue          most recent session in this directory
 #
 # Accounts live under ~/.claude-accounts/<name>/ (see quota-accounts). The
 # account named "default" is ~/.claude itself.
@@ -21,6 +24,22 @@ if [ "${1:-}" = "--account" ]; then
   account="${2:?--account needs a name}"
   shift 2
 fi
+
+# A resume flag from the command line applies to the first launch only; after a
+# handoff the session id comes from the handoff file. Everything else passes
+# through to every launch.
+first=()
+rest=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c|--continue) first+=("$1"); shift ;;
+    --resume=*) first+=("$1"); shift ;;
+    -r|--resume)
+      first+=("$1"); shift
+      if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then first+=("$1"); shift; fi ;;
+    *) rest+=("$1"); shift ;;
+  esac
+done
 
 if [ ! -f "$BASE/accounts.json" ]; then
   echo "claude-rotate: no accounts registered. Run: $HERE/quota-accounts add <name>" >&2
@@ -65,14 +84,19 @@ while :; do
 
   echo "claude-rotate: launching as $account${session:+ (resuming $session)}" >&2
   args=()
-  [ -n "$session" ] && args+=(--resume "$session")
+  if [ -n "$session" ]; then
+    args+=(--resume "$session")
+  elif [ ${#first[@]} -gt 0 ]; then
+    args+=("${first[@]}")
+    first=()
+  fi
   [ -n "$prompt" ] && args+=("$prompt")
   set +e
   CLAUDE_CONFIG_DIR="$dir" \
   QUOTA_ROTATE_ACCOUNT="$account" \
   QUOTA_ROTATE_HANDOFF="$handoff" \
   CLAUDE_CODE_PLUGIN_DIRS="$PLUGIN_DIR${CLAUDE_CODE_PLUGIN_DIRS:+:$CLAUDE_CODE_PLUGIN_DIRS}" \
-    "$CLAUDE" "${args[@]}" "$@"
+    "$CLAUDE" "${args[@]}" "${rest[@]}"
   status=$?
   set -e
 

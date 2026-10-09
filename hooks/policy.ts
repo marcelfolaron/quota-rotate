@@ -30,14 +30,18 @@ export function hasReading(usage: AccountUsage | undefined): boolean {
 
 export type Candidate = { account: string; percent: number; isKnown: boolean }
 
-/** Every account but `me`, emptiest first; a known reading outranks a guess at the same percent. */
+/**
+ * Every account but `me`, emptiest first; a known reading outranks a guess at the same percent.
+ * With a registry, only registered accounts are candidates: a reading alone (an unregistered
+ * config dir that ran the mod) is shown but never switched to.
+ */
 export function rankCandidates(
   snapshot: Snapshot,
   registry: Record<string, RegistryAccount>,
   me: string,
   nowMs: number,
 ): Candidate[] {
-  const names = new Set([...Object.keys(registry), ...Object.keys(snapshot)])
+  const names = new Set(Object.keys(registry).length > 0 ? Object.keys(registry) : Object.keys(snapshot))
   names.delete(me)
   return [...names]
     .filter(account => registry[account]?.enabled !== false)
@@ -76,6 +80,20 @@ export function accountNameOf(env: { account?: string; configDir?: string; home?
   const base = home ? `${home}/${BASE_DIR_NAME}/` : undefined
   if (base && dir.startsWith(base)) return dir.slice(base.length).split('/')[0] || DEFAULT_ACCOUNT
   return dir.split('/').pop() || DEFAULT_ACCOUNT
+}
+
+/** The registered account a live login belongs to: email plus organization, email alone when the entry has no org. */
+export function matchAccount(
+  registry: Record<string, RegistryAccount>,
+  login: { email?: string; orgId?: string },
+): string | undefined {
+  if (!login.email) return undefined
+  const sameEmail = Object.entries(registry).filter(([, account]) => account.email === login.email)
+  if (sameEmail.length === 0) return undefined
+  const byOrg = sameEmail.find(([, account]) => account.orgId !== undefined && account.orgId === login.orgId)
+  if (byOrg) return byOrg[0]
+  if (sameEmail.length === 1 && sameEmail[0]![1].orgId === undefined) return sameEmail[0]![0]
+  return undefined
 }
 
 export function clampThreshold(value: unknown, fallback = 95): number {

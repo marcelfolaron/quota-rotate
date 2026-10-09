@@ -18,6 +18,7 @@ import {
   formatAge,
   formatReset,
   hasReading,
+  matchAccount,
   pickNext,
   rankCandidates,
   windowLabel,
@@ -40,6 +41,7 @@ type Identity = {
 }
 
 let identity: Identity = { me: 'default', configDir: '', baseDir: '', handoffPath: undefined, switchAt: 95 }
+let isIdentified = false
 let isSwitching = false
 let lastNagAt = 0
 
@@ -108,13 +110,15 @@ async function identify($: EngineInterface): Promise<void> {
   try {
     const ran = await $.process.run(['claude', 'auth', 'status', '--json'], { timeoutMs: 20_000 })
     if (ran.exitCode !== 0) return
-    const status = parseJson<{ email?: string; configDirectory?: string }>(ran.stdout)
+    const status = parseJson<{ email?: string; orgId?: string }>(ran.stdout)
     if (!status?.email) return
     const accounts = await read($, registry)
-    const match = Object.entries(accounts).find(([, account]) => account.email === status.email)
-    if (match && match[0] !== identity.me) {
-      $.ui.log(`login is ${match[0]} (${status.email}); tracking that account`)
-      identity = { ...identity, me: match[0] }
+    const match = matchAccount(accounts, status)
+    if (match === undefined) return
+    isIdentified = true
+    if (match !== identity.me) {
+      $.ui.log(`login is ${match} (${status.email}); tracking that account`)
+      identity = { ...identity, me: match }
     }
   } catch (error) {
     $.ui.log(`could not read auth status: ${String(error)}`, { to: 'debug' })
@@ -198,7 +202,12 @@ export const register: Register = (on, options) => {
     if (live.rateLimits.length > 0) await record($, live.rateLimits)
 
     $.clock.every(REFRESH_MS, () => {
-      void refreshSnapshot($)
+      void (async () => {
+        await loadRegistry($)
+        await refreshSnapshot($)
+        // The registry can appear or grow after this session started (quota-accounts add).
+        if (!isIdentified && Object.keys(await read($, registry)).length > 0) await identify($)
+      })()
     })
 
     try {
@@ -260,6 +269,7 @@ export const register: Register = (on, options) => {
     const snap = await read($, snapshot)
     const accounts = await read($, registry)
     const names = [...new Set([identity.me, ...Object.keys(accounts), ...Object.keys(snap)])]
+    const isRegistered = (name: string) => Object.keys(accounts).length === 0 || name in accounts
     const candidates = rankCandidates(snap, accounts, identity.me, nowMs)
     const next = pickNext(snap, accounts, identity.me, nowMs, identity.switchAt)
     const width = Math.max(6, Math.min(20, (e.props.bodyColumns ?? 60) - 40))
@@ -269,6 +279,19 @@ export const register: Register = (on, options) => {
       const usage = snap[name]
       const isMe = name === identity.me
       const label = (isMe ? '● ' : '  ') + name.padEnd(nameWidth)
+      if (!isRegistered(name)) {
+        return [
+          Box({
+            key: `acct-${name}`,
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Text({ bold: isMe, dimColor: true, children: [label] }),
+              Text({ dimColor: true, children: [`unregistered (${Math.round(bindingPercent(usage, nowMs))}%), never switched to`] }),
+            ],
+          }),
+        ]
+      }
       if (!hasReading(usage)) {
         return [
           Box({

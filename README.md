@@ -47,7 +47,9 @@ Then launch through the rotator instead of `claude`:
 alias cr='~/Source/quota-rotate/scripts/claude-rotate'
 cr                      # picks the emptiest account
 cr --account work       # or name one
-cr -- --model opus      # anything after the launcher's own flags goes to claude
+cr --model opus         # anything after the launcher's own flags goes to claude
+cr --resume             # session picker (all accounts share projects/, so every session is listed)
+cr -r <id|name>         # resume one session; cr -c continues the latest in this directory
 ```
 
 The launcher loads the mod with `CLAUDE_CODE_PLUGIN_DIRS`, so it is active in every

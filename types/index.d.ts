@@ -22,6 +22,7 @@ export type Snapshot = Record<string, AccountUsage>
 export type RegistryAccount = {
   configDir: string
   email?: string
+  orgId?: string
   orgName?: string
   subscriptionType?: string
   enabled?: boolean
