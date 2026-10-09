@@ -91,11 +91,15 @@ while :; do
     first=()
   fi
   [ -n "$prompt" ] && args+=("$prompt")
+  # "default" runs with CLAUDE_CONFIG_DIR unset: the Keychain entry is keyed to the
+  # variable, and an explicit ~/.claude is a different entry from none.
+  config_env=()
+  if [ "$account" != "default" ]; then config_env=("CLAUDE_CONFIG_DIR=$dir"); fi
   set +e
-  CLAUDE_CONFIG_DIR="$dir" \
-  QUOTA_ROTATE_ACCOUNT="$account" \
-  QUOTA_ROTATE_HANDOFF="$handoff" \
-  CLAUDE_CODE_PLUGIN_DIRS="$PLUGIN_DIR${CLAUDE_CODE_PLUGIN_DIRS:+:$CLAUDE_CODE_PLUGIN_DIRS}" \
+  env -u CLAUDE_CONFIG_DIR "${config_env[@]}" \
+    QUOTA_ROTATE_ACCOUNT="$account" \
+    QUOTA_ROTATE_HANDOFF="$handoff" \
+    CLAUDE_CODE_PLUGIN_DIRS="$PLUGIN_DIR${CLAUDE_CODE_PLUGIN_DIRS:+:$CLAUDE_CODE_PLUGIN_DIRS}" \
     "$CLAUDE" "${args[@]}" "${rest[@]}"
   status=$?
   set -e

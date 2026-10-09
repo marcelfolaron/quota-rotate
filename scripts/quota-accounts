@@ -25,6 +25,18 @@ config_dir_of() {
   if [ "$1" = "default" ]; then printf '%s\n' "$PRIMARY"; else printf '%s\n' "$BASE/$1"; fi
 }
 
+# Runs claude as the named account. "default" means ~/.claude with the variable
+# UNSET: the macOS Keychain entry is keyed to CLAUDE_CONFIG_DIR, so an explicit
+# ~/.claude reads a different entry than no variable at all.
+claude_as() { # claude_as <name> <args...>
+  local name="$1"; shift
+  if [ "$name" = "default" ]; then
+    env -u CLAUDE_CONFIG_DIR "$CLAUDE" "$@"
+  else
+    CLAUDE_CONFIG_DIR="$BASE/$name" "$CLAUDE" "$@"
+  fi
+}
+
 write_registry() { # write_registry <name> <dir> <status-json>
   node -e '
     const fs = require("fs");
@@ -57,13 +69,13 @@ case "${1:-}" in
         fi
       done
     fi
-    if CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth status >/dev/null 2>&1; then
+    if claude_as "$name" auth status >/dev/null 2>&1; then
       echo "'$name' is already logged in at $dir; keeping that login (run 'claude auth logout' there to change it)"
     else
       echo "Logging in for account '$name' (a browser window opens; pick the right claude.ai account)..."
-      CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth login
+      claude_as "$name" auth login
     fi
-    status="$(CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth status --json 2>/dev/null || echo '{}')"
+    status="$(claude_as "$name" auth status --json 2>/dev/null || echo '{}')"
     write_registry "$name" "$dir" "$status"
     echo "Registered '$name' -> $dir"
     node -e 'const s=JSON.parse(process.argv[1]); console.log("  " + [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · "))' "$status"
@@ -71,7 +83,7 @@ case "${1:-}" in
   refresh)
     for name in $(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(Object.keys(r.accounts).join(" "))' "$REG"); do
       dir="$(config_dir_of "$name")"
-      status="$(CLAUDE_CONFIG_DIR="$dir" "$CLAUDE" auth status --json 2>/dev/null || echo '{}')"
+      status="$(claude_as "$name" auth status --json 2>/dev/null || echo '{}')"
       write_registry "$name" "$dir" "$status"
       node -e 'const s=JSON.parse(process.argv[2]); console.log(process.argv[1].padEnd(16) + (s.loggedIn ? [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · ") : "NOT logged in"))' "$name" "$status"
     done

@@ -29,7 +29,9 @@ Usage Policy either way. Read both before relying on this.
                          account sees the same sessions and setup
 ```
 
-`default` is `~/.claude` itself.
+`default` is `~/.claude` itself, run with `CLAUDE_CONFIG_DIR` **unset**. The macOS
+Keychain entry is keyed to the variable, so `CLAUDE_CONFIG_DIR=~/.claude` reads a
+different, empty entry and reports "Not logged in"; both scripts unset it for `default`.
 
 ## Setup
 
