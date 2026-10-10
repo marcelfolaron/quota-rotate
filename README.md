@@ -213,6 +213,13 @@ The engine writes its API typings to `.claude-plugin/types/` the first time the 
 loads in a session (they are gitignored); after that `tsc -p .` type-checks the mod.
 The shell tests need `node` and a bash of 3.2 or newer; they never call the real `claude`.
 
+With a copy installed, `cr` uses that copy, not your checkout; run the checkout with
+`QUOTA_ROTATE_LOAD_PLUGIN_DIR=1 cr` or `claude --plugin-dir .` while working on it.
+
+**Releasing:** bump `version` in both `.claude-plugin/plugin.json` and
+`.claude-plugin/marketplace.json`, commit, tag `v<version>`, push. Installed copies are
+cached under their version, and `claude plugin update quota-rotate` fetches the new one.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
