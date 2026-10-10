@@ -543,10 +543,9 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined) {
-      turns.delete(e.turnId)
-      await attemptSwitch($)
-    }
+    // A subagent's run raises no turn.start and completes under its own id, so this is a no-op for it.
+    turns.delete(e.turnId)
+    if (e.agentId === undefined) await attemptSwitch($)
     return result
   })
 

@@ -168,6 +168,9 @@ own mod instance writes its file. About five seconds and one tiny Haiku request 
   whether to restart them. Answer the prompt and the session continues.
 - **Readings age.** Between probes an idle account's reading can be up to six hours old;
   the pane colors the age when it is. A window whose reset time has passed counts as 0.
+- **Task status is as fresh as the last turn.** The list of background tasks comes from
+  the `Stop` hook, so a task that finished after the last turn ended still counts as
+  running until the next turn ends. An idle session burns nothing while it waits.
 - **`autoContinueAtUsageLimit`.** Claude Code's own setting (on by default) parks a session
   at a usage limit to wait for the reset. Under the launcher the threshold handoff
   normally fires first; to be safe set `"autoContinueAtUsageLimit": false` in the shared
