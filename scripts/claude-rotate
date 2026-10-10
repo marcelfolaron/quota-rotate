@@ -10,14 +10,27 @@
 #
 # Accounts live under ~/.claude-accounts/<name>/ (see quota-accounts). The
 # account named "default" is ~/.claude itself.
+#
+# Environment: QUOTA_ROTATE_SWITCH_AT (threshold for the picker, default 95),
+# QUOTA_ROTATE_NO_PROBE=1 (skip probing accounts with no reading before the first
+# pick), QUOTA_ROTATE_RESUME_PROMPT (what the relaunch sends after a rate limit),
+# CLAUDE_BIN (the claude binary), QUOTA_ROTATE_BASE (the accounts directory).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_DIR="$(cd "$HERE/.." && pwd)"
-BASE="${QUOTA_ROTATE_BASE:-$HOME/.claude-accounts}"
+. "$HERE/lib.sh"
+
 SWITCH_AT="${QUOTA_ROTATE_SWITCH_AT:-95}"
-CLAUDE="${CLAUDE_BIN:-claude}"
 RESUME_PROMPT="${QUOTA_ROTATE_RESUME_PROMPT:-The account was switched because of a usage limit. Continue exactly where you left off.}"
+
+case "${1:-}" in
+  -h|--help)
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+esac
+
+require_node
 
 account=""
 if [ "${1:-}" = "--account" ]; then
@@ -41,8 +54,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ ! -f "$BASE/accounts.json" ]; then
-  echo "claude-rotate: no accounts registered. Run: $HERE/quota-accounts add <name>" >&2
+if [ ! -f "$REG" ]; then
+  echo "claude-rotate: no accounts registered. Run: quota-accounts add <name>" >&2
   exit 1
 fi
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
@@ -54,9 +67,16 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   unset ANTHROPIC_API_KEY
 fi
 
-config_dir_of() {
-  if [ "$1" = "default" ]; then printf '%s\n' "$HOME/.claude"; else printf '%s\n' "$BASE/$1"; fi
-}
+# A handoff file is named after the launcher that owns it and removed when that
+# launcher exits; one left by a launcher that is gone (killed, machine rebooted)
+# must not be read by anyone.
+for stale in "$BASE"/handoff.*.json; do
+  [ -e "$stale" ] || continue
+  pid="${stale##*/handoff.}"
+  pid="${pid%.json}"
+  case "$pid" in *[!0-9]*|'') continue ;; esac
+  if ! kill -0 "$pid" 2>/dev/null; then rm -f "$stale"; fi
+done
 
 pick() { # pick [exclude]
   node --disable-warning=ExperimentalWarning "$HERE/pick.ts" "$BASE" "${1:-}" "$SWITCH_AT"
@@ -78,8 +98,16 @@ if [ -z "$account" ] && [ "${QUOTA_ROTATE_NO_PROBE:-0}" != "1" ]; then
     console.log(Object.entries(r.accounts).filter(([n,a])=>a.enabled!==false && !have.has(n)).map(([n])=>n).join(" "))' "$BASE")"
   for name in $unknown; do
     echo "claude-rotate: no reading for $name yet, probing…" >&2
-    "$HERE/quota-accounts" probe "$name" >/dev/null 2>&1 || echo "claude-rotate: probe of $name failed" >&2
+    probe_account "$name" || echo "claude-rotate: probe of $name failed (not logged in?)" >&2
   done
+fi
+
+# The mod loads from this folder only when it is not installed as a plugin; an
+# installed copy loads in every account through the shared plugins/ directory.
+load_env=()
+plugin_dirs="$(plugin_dirs_for_child)"
+if [ -n "$plugin_dirs" ]; then
+  load_env=("CLAUDE_CODE_PLUGIN_DIRS=$plugin_dirs")
 fi
 
 while :; do
@@ -111,10 +139,9 @@ while :; do
   config_env=()
   if [ "$account" != "default" ]; then config_env=("CLAUDE_CONFIG_DIR=$dir"); fi
   set +e
-  env -u CLAUDE_CONFIG_DIR ${config_env[@]+"${config_env[@]}"} \
+  env -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_PLUGIN_DIRS ${config_env[@]+"${config_env[@]}"} ${load_env[@]+"${load_env[@]}"} \
     QUOTA_ROTATE_ACCOUNT="$account" \
     QUOTA_ROTATE_HANDOFF="$handoff" \
-    CLAUDE_CODE_PLUGIN_DIRS="$PLUGIN_DIR${CLAUDE_CODE_PLUGIN_DIRS:+:$CLAUDE_CODE_PLUGIN_DIRS}" \
     "$CLAUDE" ${args[@]+"${args[@]}"} ${rest[@]+"${rest[@]}"}
   status=$?
   set -e

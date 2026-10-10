@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "quota-rotate",
+  "owner": { "name": "Marcel Folaron" },
+  "metadata": {
+    "description": "Usage limits across several Claude accounts in one pane, and an automatic handoff to the account with headroom.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "quota-rotate",
+      "description": "Tracks claude.ai usage limits across several Claude accounts and moves a session to the account with headroom when the current one runs out",
+      "version": "0.1.0",
+      "author": { "name": "Marcel Folaron" },
+      "category": "productivity",
+      "source": "./"
+    }
+  ]
+}

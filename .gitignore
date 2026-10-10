@@ -1,0 +1,5 @@
+# Written by the engine when the mod loads (version-specific API typings); see README "Develop".
+.claude-plugin/types/
+node_modules/
+*.tmp
+.DS_Store

@@ -4,8 +4,14 @@
 // Identity: QUOTA_ROTATE_ACCOUNT (set by scripts/claude-rotate), else derived
 // from CLAUDE_CONFIG_DIR, then corrected by `claude auth status` when the
 // registry knows the account's email.
+//
+// Handoff: the mod writes the handoff file, waits until the session is idle (no
+// turn, no running agent or background task), then ends the process with SIGTERM.
+// `/exit` through the command API cannot do this: with a background task running
+// it opens a confirmation nobody answers. The launcher sees the exit, reads the
+// file and relaunches under the next account with `--resume`.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
+import type { AgentStatus, EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
 import type { AccountUsage, Handoff, Registry, RegistryAccount, Snapshot } from '../types'
 import {
@@ -15,25 +21,34 @@ import {
   bindingPercent,
   clampThreshold,
   colorOf,
+  endSessionArgv,
   formatAge,
   formatReset,
   hasReading,
+  isInstalled,
   isStale,
   matchAccount,
   pickNext,
   probeArgv,
   PROBE_AFTER_MS,
   rankCandidates,
+  SHIM_MARKER,
+  SHIMS,
+  shimScript,
   windowLabel,
 } from './policy'
 
 const PANE = 'quota'
 const REFRESH_MS = 60_000
 const NAG_MS = 10 * 60_000
+/** Between the toast and the signal, so the toast is seen and the turn's bookkeeping is done. */
 const EXIT_DELAY_MS = 750
+/** A process still alive this long after SIGTERM did not take it: the switch is given back to the person. */
+const EXIT_GRACE_MS = 10_000
 const PROBE_TIMEOUT_MS = 120_000
 /** Before a handoff, a target's reading older than this is refreshed first. */
 const PROBE_BEFORE_SWITCH_MS = 3_600_000
+const BUSY_AGENT: ReadonlySet<AgentStatus> = new Set<AgentStatus>(['pending', 'running', 'waiting'])
 
 const snapshot = atom({ plugin: 'quota-rotate', key: 'snapshot' } as const, {})
 const registry = atom({ plugin: 'quota-rotate', key: 'registry' } as const, {})
@@ -41,21 +56,48 @@ const registry = atom({ plugin: 'quota-rotate', key: 'registry' } as const, {})
 type Identity = {
   me: string
   configDir: string
+  home: string
   baseDir: string
   handoffPath: string | undefined
   switchAt: number
+  claudeBin: string
   /** A headless probe run: record only, never probe, switch or draw. */
   isProbe: boolean
   isInteractive: boolean
+  isInstalled: boolean
 }
 
+type Pending = {
+  to: string
+  reason: Handoff['reason']
+  /** Said once: what the switch waits for. */
+  isAnnounced: boolean
+}
+
+type BackgroundTask = { id: string; type: string; status: string; description: string }
+
 let identity: Identity = {
-  me: 'default', configDir: '', baseDir: '', handoffPath: undefined, switchAt: 95, isProbe: false, isInteractive: false,
+  me: 'default',
+  configDir: '',
+  home: '',
+  baseDir: '',
+  handoffPath: undefined,
+  switchAt: 95,
+  claudeBin: 'claude',
+  isProbe: false,
+  isInteractive: false,
+  isInstalled: false,
 }
 let isIdentified = false
+/** Set from the moment a handoff is written until the process ends or the switch is given up. */
 let isSwitching = false
+let pending: Pending | undefined
 let lastNagAt = 0
 const probing = new Set<string>()
+/** Main-agent turns in flight, by id. */
+const turns = new Set<string>()
+/** The background tasks the last `Stop` reported. */
+let backgroundTasks: BackgroundTask[] = []
 
 function parseJson<T>(text: string): T | undefined {
   try {
@@ -69,14 +111,18 @@ function usageDir(): string {
   return `${identity.baseDir}/usage`
 }
 
-async function loadRegistry($: EngineInterface): Promise<void> {
-  const path = `${identity.baseDir}/accounts.json`
-  let accounts: Record<string, RegistryAccount> = {}
-  if (await $.fs.exists(path)) {
-    const parsed = parseJson<Registry>(String(await $.fs.read(path)))
-    if (parsed?.accounts) accounts = parsed.accounts
+async function readIfExists($: EngineInterface, path: string): Promise<string | undefined> {
+  if (!(await $.fs.exists(path))) return undefined
+  try {
+    return String(await $.fs.read(path))
+  } catch {
+    return undefined
   }
-  await update($, registry, () => accounts)
+}
+
+async function loadRegistry($: EngineInterface): Promise<void> {
+  const parsed = parseJson<Registry>((await readIfExists($, `${identity.baseDir}/accounts.json`)) ?? '')
+  await update($, registry, () => parsed?.accounts ?? {})
 }
 
 /** Re-reads every account's last reading; a half-written file is skipped until the next pass. */
@@ -85,7 +131,7 @@ async function refreshSnapshot($: EngineInterface): Promise<Snapshot> {
   if (await $.fs.exists(usageDir())) {
     for (const entry of await $.fs.list(usageDir())) {
       if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
-      const parsed = parseJson<AccountUsage>(String(await $.fs.read(`${usageDir()}/${entry.name}`)))
+      const parsed = parseJson<AccountUsage>((await readIfExists($, `${usageDir()}/${entry.name}`)) ?? '')
       if (parsed?.version === 1 && typeof parsed.account === 'string' && parsed.windows) next[parsed.account] = parsed
     }
   }
@@ -117,10 +163,17 @@ async function record($: EngineInterface, limits: readonly SessionRateLimit[]): 
   await update($, snapshot, current => ({ ...current, [identity.me]: reading }))
 }
 
+/** Where this plugin lives right now, for the shims `/quota-setup` writes; refreshed every start, since an update moves it. */
+async function writePluginRoot($: EngineInterface): Promise<void> {
+  const path = `${identity.baseDir}/plugin-root`
+  const current = (await readIfExists($, path))?.trim()
+  if (current !== $.plugin.root) await $.fs.write(path, `${$.plugin.root}\n`)
+}
+
 /** Matches the live login's email against the registry, so a manual /login is attributed correctly. */
 async function identify($: EngineInterface): Promise<void> {
   try {
-    const ran = await $.process.run(['claude', 'auth', 'status', '--json'], { timeoutMs: 20_000 })
+    const ran = await $.process.run([identity.claudeBin, 'auth', 'status', '--json'], { timeoutMs: 20_000 })
     if (ran.exitCode !== 0) {
       $.ui.log(`auth status exited ${ran.exitCode}: ${(ran.stderr || ran.stdout).trim().slice(0, 160)}`)
       return
@@ -146,9 +199,9 @@ async function identify($: EngineInterface): Promise<void> {
   }
 }
 
-function configDirOf(account: string, accounts: Record<string, RegistryAccount>, home: string): string | undefined {
+function configDirOf(account: string, accounts: Record<string, RegistryAccount>): string | undefined {
   const dir = accounts[account]?.configDir
-  if (dir === undefined || dir === `${home}/.claude`) return undefined
+  if (dir === undefined || dir === `${identity.home}/.claude`) return undefined
   return dir
 }
 
@@ -160,9 +213,8 @@ async function probe($: EngineInterface, account: string): Promise<boolean> {
   probing.add(account)
   $.ui.status(`probing ${account}…`)
   try {
-    const home = (await $.env.get('HOME')) ?? ''
-    const ran = await $.process.run(probeArgv(account, configDirOf(account, accounts, home), $.plugin.root), {
-      cwd: home,
+    const ran = await $.process.run(probeArgv(account, configDirOf(account, accounts), $.plugin.root, identity.claudeBin), {
+      cwd: identity.home,
       timeoutMs: PROBE_TIMEOUT_MS,
     })
     if (ran.exitCode !== 0) {
@@ -210,28 +262,105 @@ async function writeHandoff($: EngineInterface, to: string, reason: Handoff['rea
   return true
 }
 
+/** A handoff file nobody consumed (a reload, a refused exit) would relaunch the session on its next ordinary exit. */
+async function dropHandoff($: EngineInterface): Promise<void> {
+  if (identity.handoffPath === undefined || !(await $.fs.exists(identity.handoffPath))) return
+  await $.process.run(['rm', '-f', identity.handoffPath], { timeoutMs: 5_000 })
+}
+
+/** What the session is in the middle of, or undefined when it is idle. */
+async function busyWith($: EngineInterface, isForced: boolean): Promise<string | undefined> {
+  if (turns.size > 0) return 'this turn'
+  // A forced switch (rate limit, or asked for) waits for the turn alone: agents on this account are blocked too.
+  if (isForced) return undefined
+  let agents = 0
+  try {
+    agents = (await $.agent.list()).filter(agent => BUSY_AGENT.has(agent.status)).length
+  } catch {
+    agents = 0
+  }
+  if (agents > 0) return agents === 1 ? 'the running agent' : `${agents} running agents`
+  const tasks = backgroundTasks.filter(task => task.status === 'running' || task.status === 'pending').length
+  if (tasks > 0) return tasks === 1 ? 'the background task' : `${tasks} background tasks`
+  return undefined
+}
+
+function giveUpSwitch($: EngineInterface, text: string): void {
+  isSwitching = false
+  pending = undefined
+  $.ui.status(undefined)
+  $.ui.toast(text, { timeoutMs: 15_000 })
+}
+
+/** Ends this process with SIGTERM; the launcher takes over. Still alive after the grace period, the switch is handed back. */
+async function endSession($: EngineInterface, to: string): Promise<void> {
+  try {
+    const ran = await $.process.run(endSessionArgv(), { timeoutMs: 5_000 })
+    if (ran.exitCode !== 0) {
+      $.ui.log(`could not end the session: ${(ran.stderr || ran.stdout).trim().slice(0, 200)}`)
+      giveUpSwitch($, `type /exit to switch to ${to}`)
+      return
+    }
+  } catch (error) {
+    $.ui.log(`could not end the session: ${String(error).slice(0, 200)}`)
+    giveUpSwitch($, `type /exit to switch to ${to}`)
+    return
+  }
+  $.clock.after(EXIT_GRACE_MS, () => {
+    if (isSwitching) giveUpSwitch($, `the session did not end; type /exit to switch to ${to}`)
+  })
+}
+
+/** Carries a pending switch out once the session is idle; called at every point that may have made it so. */
+async function attemptSwitch($: EngineInterface): Promise<void> {
+  if (pending === undefined) return
+  const isForced = pending.reason !== 'threshold'
+  const busy = await busyWith($, isForced)
+  if (busy !== undefined) {
+    $.ui.status(`switching to ${pending.to} once ${busy} ends`)
+    if (!pending.isAnnounced) {
+      pending.isAnnounced = true
+      $.ui.toast(`${identity.me} is out of quota: switching to ${pending.to} once ${busy} ends`, { timeoutMs: 10_000 })
+    }
+    return
+  }
+  const { to } = pending
+  $.ui.status(`switching to ${to}…`)
+  $.ui.toast(`switching to ${to}: this session resumes there`, { timeoutMs: 8_000 })
+  $.clock.after(EXIT_DELAY_MS, () => {
+    void endSession($, to)
+  })
+}
+
 /** Hands the session to `to`: the launcher relaunches under that account and resumes this session id. */
 async function switchTo($: EngineInterface, to: string, reason: Handoff['reason']): Promise<void> {
-  if (isSwitching) return
+  if (isSwitching) {
+    // A switch already waiting is upgraded by a forced one: it no longer waits for agents or tasks.
+    if (pending !== undefined && reason !== 'threshold' && pending.reason === 'threshold') {
+      pending = { ...pending, reason }
+      await writeHandoff($, pending.to, reason)
+      await attemptSwitch($)
+    }
+    return
+  }
   if (!(await writeHandoff($, to, reason))) {
     $.ui.toast(`not running under claude-rotate; run /login and pick ${to} yourself`, { timeoutMs: 12_000 })
     return
   }
   isSwitching = true
-  $.ui.toast(`switching to ${to}: this session resumes there`, { timeoutMs: 8_000 })
-  $.clock.after(EXIT_DELAY_MS, () => {
-    $.command.run({ command: 'exit' }).catch(() => {
-      isSwitching = false
-      $.ui.toast(`type /exit to switch to ${to}`, { timeoutMs: 15_000 })
-    })
-  })
+  pending = { to, reason, isAnnounced: false }
+  await attemptSwitch($)
 }
 
 async function maybeSwitch($: EngineInterface, reason: Handoff['reason'], isForced: boolean): Promise<void> {
-  if (isSwitching || identity.isProbe) return
+  if (identity.isProbe) return
   let nowMs = await $.clock.now()
   let snap = await read($, snapshot)
   const mine = myPercent(snap, nowMs)
+  if (isSwitching) {
+    if (isForced) await switchTo($, pending?.to ?? '', reason)
+    return
+  }
   if (!isForced && mine < identity.switchAt) {
     $.ui.status(mine >= 70 ? `${identity.me} at ${mine}% (switches at ${identity.switchAt}%)` : undefined)
     return
@@ -256,6 +385,43 @@ async function maybeSwitch($: EngineInterface, reason: Handoff['reason'], isForc
   await switchTo($, to, reason)
 }
 
+/** Puts `cr`, `claude-rotate` and `quota-accounts` on the PATH as shims that find the plugin's current folder. */
+async function setup($: EngineInterface): Promise<string> {
+  await writePluginRoot($)
+  const binDir = (await $.env.get('QUOTA_ROTATE_BIN_DIR')) ?? `${identity.home}/.local/bin`
+  const written: string[] = []
+  const kept: string[] = []
+  for (const shim of SHIMS) {
+    const path = `${binDir}/${shim.name}`
+    const existing = await readIfExists($, path)
+    if (existing !== undefined && !existing.includes(SHIM_MARKER)) {
+      kept.push(path)
+      continue
+    }
+    await $.fs.write(path, shimScript(shim.target))
+    const chmod = await $.process.run(['chmod', '+x', path], { timeoutMs: 5_000 })
+    if (chmod.exitCode !== 0) $.ui.log(`chmod +x ${path} failed: ${chmod.stderr.trim()}`)
+    written.push(shim.name)
+  }
+  const onPath = ((await $.env.get('PATH')) ?? '').split(':').includes(binDir)
+  const accounts = Object.keys(await read($, registry))
+  const lines = [
+    written.length > 0 ? `Installed ${written.join(', ')} in ${binDir}.` : `Nothing written to ${binDir}.`,
+    ...kept.map(path => `Left ${path} alone: it is not a quota-rotate shim.`),
+    ...(onPath ? [] : [`${binDir} is not on your PATH. Add this line to your shell profile, then open a new terminal:`, `  export PATH="${binDir}:$PATH"`]),
+    '',
+    ...(accounts.length === 0
+      ? [
+          'Next, from a terminal, register each account you own (each opens a browser login once):',
+          '  quota-accounts add default      # the login in ~/.claude',
+          '  quota-accounts add work         # any name you like',
+          'Then start Claude Code with `cr` instead of `claude`.',
+        ]
+      : [`Accounts registered: ${accounts.join(', ')}. Start Claude Code with \`cr\` instead of \`claude\`.`]),
+  ]
+  return lines.join('\n')
+}
+
 export const register: Register = (on, options) => {
   identity = { ...identity, switchAt: clampThreshold(options.switch_at) }
 
@@ -265,12 +431,18 @@ export const register: Register = (on, options) => {
     identity = {
       ...identity,
       configDir,
+      home,
       baseDir: `${home}/${BASE_DIR_NAME}`,
       handoffPath: await $.env.get('QUOTA_ROTATE_HANDOFF'),
       me: accountNameOf({ account: await $.env.get('QUOTA_ROTATE_ACCOUNT'), configDir, home }),
+      claudeBin: (await $.env.get('CLAUDE_BIN')) ?? 'claude',
       isProbe: (await $.env.get('QUOTA_ROTATE_PROBE')) === '1',
       isInteractive: e.isInteractive,
+      isInstalled: isInstalled(await readIfExists($, `${configDir}/plugins/installed_plugins.json`)),
     }
+    isSwitching = false
+    pending = undefined
+    turns.clear()
     await loadRegistry($)
     await refreshSnapshot($)
     await identify($)
@@ -278,12 +450,16 @@ export const register: Register = (on, options) => {
     if (live.rateLimits.length > 0) await record($, live.rateLimits)
     if (identity.isProbe) return next(e)
 
+    await writePluginRoot($)
+    await dropHandoff($)
+
     $.clock.every(REFRESH_MS, () => {
       void (async () => {
         await loadRegistry($)
         await refreshSnapshot($)
         // The registry can appear or grow after this session started (quota-accounts add).
         if (!isIdentified && Object.keys(await read($, registry)).length > 0) await identify($)
+        await attemptSwitch($)
         await probeStale($, PROBE_AFTER_MS)
       })()
     })
@@ -304,12 +480,23 @@ export const register: Register = (on, options) => {
         description: 'Refresh the other accounts\' readings with a one-line headless run each',
         argumentHint: '[account]',
       })
+      await $.command.register({
+        name: 'quota-setup',
+        description: 'Put the cr launcher and quota-accounts on your PATH',
+      })
     } catch (error) {
       $.ui.log(`command not registered: ${String(error)}`)
     }
-    // The handoff exits the session through /exit; say up front whether that command is reachable.
-    const hasExit = (await $.command.list()).some(command => command.name === 'exit')
-    $.ui.log(`account ${identity.me} · switch at ${identity.switchAt}% · ${identity.handoffPath ? 'under claude-rotate' : 'no launcher'} · /exit ${hasExit ? 'available' : 'NOT listed'}`)
+    const accounts = Object.keys(await read($, registry))
+    $.ui.log(
+      [
+        `account ${identity.me}`,
+        `switch at ${identity.switchAt}%`,
+        identity.handoffPath ? 'under claude-rotate' : 'no launcher: switches are manual',
+        identity.isInstalled ? 'installed' : `loaded from ${$.plugin.root}`,
+        ...(accounts.length === 0 ? ['no accounts registered: run /quota-setup'] : []),
+      ].join(' · '),
+    )
     if (e.isInteractive) void $.ui.open({ id: PANE, title: 'Quota' })
     return next(e)
   })
@@ -321,6 +508,10 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'quota-switch' }, async ($, e) => {
+    if (isSwitching && pending !== undefined) {
+      const busy = await busyWith($, pending.reason !== 'threshold')
+      return { text: busy ? `Already switching to ${pending.to} once ${busy} ends.` : `Already switching to ${pending.to}.` }
+    }
     const nowMs = await $.clock.now()
     const snap = await refreshSnapshot($)
     const accounts = await read($, registry)
@@ -330,7 +521,7 @@ export const register: Register = (on, options) => {
     if (to === identity.me) return { text: `This session already runs as ${to}.` }
     if (wanted && !(wanted in accounts) && !(wanted in snap)) return { text: `Unknown account ${wanted}.` }
     await switchTo($, to, 'manual')
-    return { text: `Switching to ${to}.` }
+    return { text: identity.handoffPath ? `Switching to ${to}.` : `Not under claude-rotate: run /login and pick ${to}.` }
   })
 
   on('command.run', { command: 'quota-probe' }, async ($, e) => {
@@ -343,10 +534,42 @@ export const register: Register = (on, options) => {
     return { text: 'Probed every other account.' }
   })
 
+  on('command.run', { command: 'quota-setup' }, async $ => ({ text: await setup($) }))
+
+  on('turn.start', ($, e, next) => {
+    turns.add(e.turnId)
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined) {
+      turns.delete(e.turnId)
+      await attemptSwitch($)
+    }
+    return result
+  })
+
   on('session.measure', async ($, e, next) => {
     if (e.rateLimits.length > 0) await record($, e.rateLimits)
     await maybeSwitch($, 'threshold', false)
     return next(e)
+  })
+
+  on('classic.Stop', async ($, e, next) => {
+    backgroundTasks = (e.background_tasks ?? []).map(task => ({
+      id: task.id,
+      type: task.type,
+      status: task.status,
+      description: task.description,
+    }))
+    return next(e)
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const result = await next(e)
+    await attemptSwitch($)
+    return result
   })
 
   on('classic.StopFailure', { error: 'rate_limit' }, async ($, e, next) => {
@@ -371,6 +594,7 @@ export const register: Register = (on, options) => {
     const next = pickNext(snap, accounts, identity.me, nowMs, identity.switchAt)
     const width = Math.max(6, Math.min(20, (e.props.bodyColumns ?? 60) - 40))
     const nameWidth = Math.max(8, ...names.map(n => n.length))
+    const busy = pending !== undefined ? await busyWith($, pending.reason !== 'threshold') : undefined
 
     const rows = names.flatMap(name => {
       const usage = snap[name]
@@ -423,11 +647,15 @@ export const register: Register = (on, options) => {
     })
 
     const summary =
-      next !== undefined
-        ? `next: ${next} (${Math.round(candidates.find(c => c.account === next)?.percent ?? 0)}%)`
-        : candidates.length === 0
-          ? 'no other accounts registered'
-          : 'no other account has headroom'
+      pending !== undefined
+        ? busy !== undefined
+          ? `switching to ${pending.to} once ${busy} ends`
+          : `switching to ${pending.to}…`
+        : next !== undefined
+          ? `next: ${next} (${Math.round(candidates.find(c => c.account === next)?.percent ?? 0)}%)`
+          : candidates.length === 0
+            ? 'no other accounts registered'
+            : 'no other account has headroom'
 
     return Box({
       flexDirection: 'column',

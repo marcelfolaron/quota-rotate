@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Tracks claude.ai usage limits across several Claude accounts and moves a session to the account with headroom when the current one runs out",
   "author": { "name": "Marcel Folaron" },
+  "homepage": "https://github.com/marcelfolaron/quota-rotate",
+  "repository": "https://github.com/marcelfolaron/quota-rotate",
+  "license": "MIT",
   "keywords": ["usage", "rate-limit", "accounts"],
   "types": "./types/index.d.ts",
   "userConfig": {

@@ -11,32 +11,26 @@
 #   quota-accounts remove <name>   forget it (keeps the directory)
 set -euo pipefail
 
-BASE="${QUOTA_ROTATE_BASE:-$HOME/.claude-accounts}"
-PRIMARY="$HOME/.claude"
-# A terminal wrapper on PATH (cmux ships one) injects flags before subcommands;
-# CLAUDE_BIN names the real binary when that gets in the way.
-CLAUDE="${CLAUDE_BIN:-claude}"
-REG="$BASE/accounts.json"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/lib.sh"
+
 SHARED=(projects plugins skills commands agents settings.json CLAUDE.md keybindings.json)
 
+usage() {
+  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  -h|--help|'')
+    usage
+    [ "${1:-}" = "" ] && exit 2
+    exit 0
+    ;;
+esac
+
+require_node
 mkdir -p "$BASE/usage"
 [ -f "$REG" ] || printf '{ "version": 1, "accounts": {} }\n' >"$REG"
-
-config_dir_of() {
-  if [ "$1" = "default" ]; then printf '%s\n' "$PRIMARY"; else printf '%s\n' "$BASE/$1"; fi
-}
-
-# Runs claude as the named account. "default" means ~/.claude with the variable
-# UNSET: the macOS Keychain entry is keyed to CLAUDE_CONFIG_DIR, so an explicit
-# ~/.claude reads a different entry than no variable at all.
-claude_as() { # claude_as <name> <args...>
-  local name="$1"; shift
-  if [ "$name" = "default" ]; then
-    env -u CLAUDE_CONFIG_DIR "$CLAUDE" "$@"
-  else
-    CLAUDE_CONFIG_DIR="$BASE/$name" "$CLAUDE" "$@"
-  fi
-}
 
 write_registry() { # write_registry <name> <dir> <status-json>
   node -e '
@@ -57,7 +51,7 @@ write_registry() { # write_registry <name> <dir> <status-json>
   ' "$REG" "$1" "$2" "${3:-}"
 }
 
-case "${1:-}" in
+case "$1" in
   add)
     name="${2:?quota-accounts add <name>}"
     case "$name" in *[!a-zA-Z0-9_-]*) echo "name must be letters, digits, - or _" >&2; exit 2;; esac
@@ -82,20 +76,11 @@ case "${1:-}" in
     node -e 'const s=JSON.parse(process.argv[1]); console.log("  " + [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · "))' "$status"
     ;;
   probe)
-    PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     names="${2:-}"
-    [ -n "$names" ] || names="$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(Object.entries(r.accounts).filter(([,a])=>a.enabled!==false).map(([n])=>n).join(" "))' "$REG")"
+    [ -n "$names" ] || names="$(registry_names)"
     for name in $names; do
       printf 'probing %s… ' "$name"
-      cfg=()
-      [ "$name" = "default" ] || cfg=("CLAUDE_CONFIG_DIR=$BASE/$name")
-      if (cd "$HOME" && env -u CLAUDE_CONFIG_DIR -u QUOTA_ROTATE_HANDOFF -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY \
-            ${cfg[@]+"${cfg[@]}"} QUOTA_ROTATE_ACCOUNT="$name" QUOTA_ROTATE_PROBE=1 CLAUDE_CODE_PLUGIN_DIRS="$PLUGIN_DIR" \
-            "$CLAUDE" -p "Reply with the single word ok." --model haiku --setting-sources user >/dev/null 2>&1); then
-        echo "ok"
-      else
-        echo "FAILED (not logged in?)"
-      fi
+      if probe_account "$name"; then echo "ok"; else echo "FAILED (not logged in?)"; fi
     done
     "$0" list
     ;;
@@ -137,7 +122,7 @@ case "${1:-}" in
     echo "Removed '$name' from the registry (directory kept)."
     ;;
   *)
-    sed -n '2,10p' "$0"
+    usage
     exit 2
     ;;
 esac

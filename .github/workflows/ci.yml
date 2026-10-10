@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # A config dir of its own: no login, no settings, nothing of the runner's user.
+      CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          mkdir -p "$CLAUDE_CONFIG_DIR"
+          claude --version
+      - name: Validate, mod tests, shell tests
+        run: bash tests/run.sh
