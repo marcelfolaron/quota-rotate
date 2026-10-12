@@ -100,6 +100,12 @@ export function matchAccount(
 
 /** Six hours: a reading older than this is refreshed with a probe before it is trusted. */
 export const PROBE_AFTER_MS = 6 * 3_600_000
+/** A probe still running after this is killed; a healthy one takes two or three seconds. */
+export const PROBE_TIMEOUT_MS = 60_000
+/** After a failed probe the account is left alone for this long, by every session. */
+export const PROBE_RETRY_MS = 30 * 60_000
+/** A probe another session started less than this ago is still running: no second one. */
+export const PROBE_INFLIGHT_MS = 3 * 60_000
 
 /** True when the account has no reading, or one older than `maxAgeMs`. */
 export function isStale(usage: AccountUsage | undefined, nowMs: number, maxAgeMs: number): boolean {
@@ -108,22 +114,91 @@ export function isStale(usage: AccountUsage | undefined, nowMs: number, maxAgeMs
   return !Number.isFinite(observed) || nowMs - observed > maxAgeMs
 }
 
+/** True when a window of the last reading stands at 100 and its reset is still ahead: nothing changes until then. */
+export function isKnownFull(usage: AccountUsage | undefined, nowMs: number): boolean {
+  if (!hasReading(usage)) return false
+  return Object.values(usage!.windows).some(window => {
+    if (window.percentUsed < 100 || window.resetsAt === undefined) return false
+    const resets = Date.parse(window.resetsAt)
+    return Number.isFinite(resets) && resets > nowMs
+  })
+}
+
+/** `usage/<account>.probe.json`: what the last probe of that account came to, shared by every session. */
+export type ProbeMark = {
+  startedAt?: string
+  failedAt?: string
+}
+
+export type ProbeVerdict = 'fresh' | 'full' | 'in-flight' | 'failed-recently' | 'due'
+
+/** Whether to probe an account now. `isForced` (a person asked) skips only a probe already running. */
+export function probeVerdict(
+  usage: AccountUsage | undefined,
+  mark: ProbeMark | undefined,
+  nowMs: number,
+  maxAgeMs: number,
+  isForced = false,
+): ProbeVerdict {
+  const started = mark?.startedAt === undefined ? NaN : Date.parse(mark.startedAt)
+  if (Number.isFinite(started) && nowMs - started < PROBE_INFLIGHT_MS && mark?.failedAt === undefined) return 'in-flight'
+  if (isForced) return 'due'
+  const failed = mark?.failedAt === undefined ? NaN : Date.parse(mark.failedAt)
+  if (Number.isFinite(failed) && nowMs - failed < PROBE_RETRY_MS) return 'failed-recently'
+  if (isKnownFull(usage, nowMs)) return 'full'
+  if (!isStale(usage, nowMs, maxAgeMs)) return 'fresh'
+  return 'due'
+}
+
 /**
- * The argv of a probe: a one-line headless run under `account` with this mod loaded, so that
- * account's own mod instance writes its reading. `env -u` first, so the launcher's variables and
- * an explicit ~/.claude never leak into the probe (the primary's Keychain entry is keyed to NO variable).
- * The mod's folder is always passed: in a headless run a second load beside an installed copy
- * costs nothing, and the probe then works whatever the install scope.
+ * Variables that would make the probe look like a child of this session (its id, its messaging
+ * socket, its remote-control bridge) or change how it runs. A probe is a process of its own.
  */
-export function probeArgv(account: string, configDir: string | undefined, pluginRoot: string, claudeBin = 'claude'): string[] {
+export const PROBE_UNSET_VARS = [
+  'CLAUDE_CONFIG_DIR',
+  'QUOTA_ROTATE_HANDOFF',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_PLUGIN_DIRS',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_PLUGIN_DATA',
+  'CLAUDE_PID',
+  'CLAUDECODE',
+] as const
+
+/**
+ * The argv of a probe: one headless Haiku turn under `account` with this mod loaded, so that
+ * account's own mod instance writes its reading. Nothing else runs: no MCP server, no tool, no
+ * transcript, and no wait at a usage limit (the run fails instead, and the failure is backed off).
+ * `env -u` first, so the launcher's variables and an explicit ~/.claude never leak into the probe
+ * (the primary's Keychain entry is keyed to NO variable). `pluginRoot` is passed only when the mod
+ * is not installed: an installed copy loads in every account through the shared plugins directory.
+ */
+export function probeArgv(
+  account: string,
+  configDir: string | undefined,
+  options: { pluginRoot?: string; claudeBin?: string } = {},
+): string[] {
   return [
     'env',
-    '-u', 'CLAUDE_CONFIG_DIR', '-u', 'QUOTA_ROTATE_HANDOFF', '-u', 'CLAUDE_CODE_OAUTH_TOKEN', '-u', 'ANTHROPIC_API_KEY',
+    ...PROBE_UNSET_VARS.flatMap(name => ['-u', name]),
     ...(configDir !== undefined ? [`CLAUDE_CONFIG_DIR=${configDir}`] : []),
     `QUOTA_ROTATE_ACCOUNT=${account}`,
     'QUOTA_ROTATE_PROBE=1',
-    `CLAUDE_CODE_PLUGIN_DIRS=${pluginRoot}`,
-    claudeBin, '-p', 'Reply with the single word ok.', '--model', 'haiku', '--setting-sources', 'user',
+    ...(options.pluginRoot !== undefined ? [`CLAUDE_CODE_PLUGIN_DIRS=${options.pluginRoot}`] : []),
+    options.claudeBin ?? 'claude',
+    '-p', 'Reply with the single word ok.',
+    '--model', 'haiku',
+    '--setting-sources', 'user',
+    '--settings', '{"autoContinueAtUsageLimit":false}',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    '--tools', '',
+    '--no-session-persistence',
   ]
 }
 

@@ -41,6 +41,10 @@ type Host = {
   commands: string[]
   opened: string[]
   agents: { id: string; status: string }[]
+  /** When set, every probe the mod runs is killed by the host (a timeout), as a hung child is. */
+  probesFail: boolean
+  /** The accounts the mod probed, in order. */
+  probed: string[]
   /** True once the mod ran the script that sends SIGTERM to the session. */
   isEnded: () => boolean
   handoff: () => Handoff | undefined
@@ -57,6 +61,8 @@ function host(on: On, env: Record<string, string>, files: Record<string, string>
     commands: [],
     opened: [],
     agents: [],
+    probesFail: false,
+    probed: [],
     isEnded: () => state.runs.some(argv => argv[0] === 'sh' && argv[2] === END_SESSION_SCRIPT),
     handoff: () => {
       const text = state.files.get(HANDOFF)
@@ -102,6 +108,14 @@ function host(on: On, env: Record<string, string>, files: Record<string, string>
       return { value: ok }
     }
     if (argv[1] === 'auth') return { value: { ...ok, stdout: JSON.stringify({ loggedIn: true, email: 'me@example.com', orgId: 'org-work' }) } }
+    if (argv[0] === 'env') {
+      const account = argv.find(a => a.startsWith('QUOTA_ROTATE_ACCOUNT='))?.slice('QUOTA_ROTATE_ACCOUNT='.length) ?? '?'
+      state.probed.push(account)
+      if (state.probesFail) throw new Error('$.process.run(env) aborted: still running after 60000ms')
+      // The probed account's own mod instance writes its reading.
+      state.files.set(`${BASE}/usage/${account}.json`, JSON.stringify({ ...reading(account, 10), observedAt: new Date(NOW).toISOString() }))
+      return { value: { ...ok, stdout: 'ok' } }
+    }
     return { value: ok }
   })
   on('session.id', () => ({ value: 'sess-1' }))
@@ -311,6 +325,66 @@ describe('handing off', () => {
     await $.session.measure(measure(97))
     await clock.advance(750)
     expect(h.runs.filter(argv => argv[2] === END_SESSION_SCRIPT).length).toBe(2)
+  })
+})
+
+describe('probes', () => {
+  const STALE = new Date(NOW - 7 * 3_600_000).toISOString()
+  const spare = { configDir: `${BASE}/spare`, email: 'me@example.com', orgId: 'org-spare', enabled: true }
+  const full = { configDir: `${BASE}/full`, email: 'me@example.com', orgId: 'org-full', enabled: true }
+
+  function probeFiles(extra: Record<string, string> = {}): Record<string, string> {
+    return {
+      ...files(),
+      [`${BASE}/accounts.json`]: JSON.stringify({ version: 1, accounts: { ...REGISTRY.accounts, spare, full } }),
+      [`${BASE}/usage/full.json`]: JSON.stringify({ ...reading('full', 100, STALE), windows: { seven_day: { percentUsed: 100, resetsAt: LATER } } }),
+      ...extra,
+    }
+  }
+
+  test('shortly after start, an account with no reading is probed and a full one is left alone', async ($, on) => {
+    const h = host(on, LAUNCHER_ENV, probeFiles())
+    const clock = mock.clock(on, { now: NOW })
+    await $.session.start(START)
+    await clock.advance(3_000)
+    expect(h.probed).toEqual(['spare'])
+    expect(h.files.has(`${BASE}/usage/spare.probe.json`)).toBe(false)
+    const argv = h.runs.find(r => r[0] === 'env')!
+    expect(argv).toContain('--strict-mcp-config')
+    expect(argv.some(a => a.startsWith('CLAUDE_CODE_PLUGIN_DIRS='))).toBe(true)
+    // The reading the probe produced is in the pane's data from then on.
+    await clock.advance(60_000)
+    expect(h.probed).toEqual(['spare'])
+  })
+
+  test('a failed probe is said once and backed off for thirty minutes, for every session', async ($, on) => {
+    const h = host(on, LAUNCHER_ENV, probeFiles())
+    h.probesFail = true
+    const clock = mock.clock(on, { now: NOW })
+    await $.session.start(START)
+    await clock.advance(3_000)
+    expect(h.probed).toEqual(['spare'])
+    const mark = JSON.parse(h.files.get(`${BASE}/usage/spare.probe.json`) ?? '{}') as { failedAt?: string }
+    expect(mark.failedAt).toBe(new Date(NOW + 3_000).toISOString())
+    expect(h.logs.filter(l => l.includes('probe of spare failed')).length).toBe(1)
+    await clock.advance(10 * 60_000)
+    expect(h.probed).toEqual(['spare'])
+    await clock.advance(21 * 60_000)
+    expect(h.probed).toEqual(['spare', 'spare'])
+    expect(h.logs.filter(l => l.includes('probe of spare failed')).length).toBe(1)
+  })
+
+  test('a probe another session started is not doubled; /quota-probe overrides a backoff but not that', async ($, on) => {
+    const h = host(on, LAUNCHER_ENV, probeFiles({ [`${BASE}/usage/spare.probe.json`]: JSON.stringify({ startedAt: new Date(NOW - 30_000).toISOString() }) }))
+    const clock = mock.clock(on, { now: NOW })
+    await $.session.start(START)
+    await clock.advance(3_000)
+    expect(h.probed).toEqual([])
+    const run = { command: 'quota-probe', args: 'spare', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as never
+    expect((await $.command.run(run)).text).toBe('Could not probe spare.')
+    h.files.set(`${BASE}/usage/spare.probe.json`, JSON.stringify({ failedAt: new Date(NOW).toISOString() }))
+    expect((await $.command.run(run)).text).toBe('Probed spare.')
+    expect(h.probed).toEqual(['spare'])
   })
 })
 

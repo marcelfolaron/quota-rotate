@@ -148,7 +148,9 @@ email and organization, so a manual `/login` is attributed correctly.
 An account that has not run a session has no reading, and claude.ai web use on an idle
 account is invisible. A probe is a one-line headless run under that account with the mod
 loaded (`claude -p "Reply with the single word ok." --model haiku`), so that account's
-own mod instance writes its file. About five seconds and one tiny Haiku request each.
+own mod instance writes its file. Two or three seconds and one tiny Haiku request each.
+The run starts no MCP server, loads no tool, saves no transcript, and does not wait at a
+usage limit; it fails instead.
 
 - A session probes every other account whose reading is missing or older than six hours,
   shortly after start and then once a minute.
@@ -156,6 +158,11 @@ own mod instance writes its file. About five seconds and one tiny Haiku request 
 - `/quota-probe`, the pane's `p` key and `quota-accounts probe` do it on demand.
 - `cr` probes accounts with no reading before its first pick (`QUOTA_ROTATE_NO_PROBE=1`
   skips that).
+- An account whose last reading stands at 100 percent with the reset still ahead is not
+  probed: nothing changes there until the reset, and a passed reset already counts as 0.
+- A probe still running after 60 seconds is killed and reported once; the account is then
+  left alone for 30 minutes by every session. One probe per account runs at a time across
+  all sessions (`usage/<account>.probe.json` carries the state).
 
 ## Limits and caveats
 

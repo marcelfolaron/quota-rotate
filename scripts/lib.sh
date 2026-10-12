@@ -71,7 +71,9 @@ claude_as() { # claude_as <name> <args...>
 }
 
 # One headless turn under <name> with the mod loaded, so that account's own mod
-# instance writes its reading. Quiet; the exit status says whether it ran.
+# instance writes its reading. Nothing else runs: no MCP server, no tool, no
+# transcript, no wait at a usage limit. Quiet; the exit status says whether it ran.
+# Keep in step with probeArgv in hooks/policy.ts.
 probe_account() { # probe_account <name>
   local name="$1" dirs
   local cfg=() load=()
@@ -79,8 +81,12 @@ probe_account() { # probe_account <name>
   dirs="$(plugin_dirs_for_child)"
   [ -z "$dirs" ] || load=("CLAUDE_CODE_PLUGIN_DIRS=$dirs")
   (cd "$HOME" && env -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_PLUGIN_DIRS -u QUOTA_ROTATE_HANDOFF -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY \
+      -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_BRIDGE_SESSION_ID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN \
+      -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_PLUGIN_DATA -u CLAUDE_PID -u CLAUDECODE \
       ${cfg[@]+"${cfg[@]}"} ${load[@]+"${load[@]}"} QUOTA_ROTATE_ACCOUNT="$name" QUOTA_ROTATE_PROBE=1 \
-      "$CLAUDE" -p "Reply with the single word ok." --model haiku --setting-sources user >/dev/null 2>&1)
+      "$CLAUDE" -p "Reply with the single word ok." --model haiku --setting-sources user \
+      --settings '{"autoContinueAtUsageLimit":false}' --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+      --tools "" --no-session-persistence >/dev/null 2>&1)
 }
 
 registry_names() { # every enabled account, space separated

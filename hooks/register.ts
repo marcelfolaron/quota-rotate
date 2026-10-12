@@ -14,6 +14,7 @@ import { atom, read, update } from 'claude-code'
 import type { AgentStatus, EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
 import type { AccountUsage, Handoff, Registry, RegistryAccount, Snapshot } from '../types'
+import type { ProbeMark } from './policy'
 import {
   BASE_DIR_NAME,
   accountNameOf,
@@ -30,7 +31,10 @@ import {
   matchAccount,
   pickNext,
   probeArgv,
+  probeVerdict,
   PROBE_AFTER_MS,
+  PROBE_RETRY_MS,
+  PROBE_TIMEOUT_MS,
   rankCandidates,
   SHIM_MARKER,
   SHIMS,
@@ -45,7 +49,6 @@ const NAG_MS = 10 * 60_000
 const EXIT_DELAY_MS = 750
 /** A process still alive this long after SIGTERM did not take it: the switch is given back to the person. */
 const EXIT_GRACE_MS = 10_000
-const PROBE_TIMEOUT_MS = 120_000
 /** Before a handoff, a target's reading older than this is refreshed first. */
 const PROBE_BEFORE_SWITCH_MS = 3_600_000
 const BUSY_AGENT: ReadonlySet<AgentStatus> = new Set<AgentStatus>(['pending', 'running', 'waiting'])
@@ -94,6 +97,8 @@ let isSwitching = false
 let pending: Pending | undefined
 let lastNagAt = 0
 const probing = new Set<string>()
+/** Accounts whose last probe from this session failed: the failure is said once, not on every retry. */
+const probeFailed = new Set<string>()
 /** Main-agent turns in flight, by id. */
 const turns = new Set<string>()
 /** The background tasks the last `Stop` reported. */
@@ -205,41 +210,68 @@ function configDirOf(account: string, accounts: Record<string, RegistryAccount>)
   return dir
 }
 
-/** Runs one headless turn under `account`; that account's mod writes its reading, then we re-read. */
-async function probe($: EngineInterface, account: string): Promise<boolean> {
+function probeMarkPath(account: string): string {
+  return `${usageDir()}/${account}.probe.json`
+}
+
+async function readProbeMark($: EngineInterface, account: string): Promise<ProbeMark | undefined> {
+  return parseJson<ProbeMark>((await readIfExists($, probeMarkPath(account))) ?? '')
+}
+
+/**
+ * Runs one headless turn under `account`; that account's mod writes its reading, then we re-read.
+ * The mark file tells other sessions a probe is running, and after a failure keeps every session
+ * off that account for a while. `isForced` (a person asked) ignores everything but a running probe.
+ */
+async function probe($: EngineInterface, account: string, isForced = false): Promise<boolean> {
   if (identity.isProbe || probing.has(account) || account === identity.me) return false
   const accounts = await read($, registry)
   if (!(account in accounts)) return false
+  const nowMs = await $.clock.now()
+  const verdict = probeVerdict((await read($, snapshot))[account], await readProbeMark($, account), nowMs, PROBE_AFTER_MS, isForced)
+  if (verdict !== 'due') return false
   probing.add(account)
   $.ui.status(`probing ${account}…`)
+  await $.fs.write(probeMarkPath(account), JSON.stringify({ startedAt: new Date(nowMs).toISOString() }) + '\n')
+  let failure: string | undefined
   try {
-    const ran = await $.process.run(probeArgv(account, configDirOf(account, accounts), $.plugin.root, identity.claudeBin), {
-      cwd: identity.home,
-      timeoutMs: PROBE_TIMEOUT_MS,
-    })
-    if (ran.exitCode !== 0) {
-      $.ui.log(`probe of ${account} exited ${ran.exitCode}: ${(ran.stderr || ran.stdout).trim().slice(0, 200)}`)
-    }
-    await refreshSnapshot($)
-    return ran.exitCode === 0
+    const ran = await $.process.run(
+      probeArgv(account, configDirOf(account, accounts), {
+        claudeBin: identity.claudeBin,
+        ...(identity.isInstalled ? {} : { pluginRoot: $.plugin.root }),
+      }),
+      { cwd: identity.home, timeoutMs: PROBE_TIMEOUT_MS },
+    )
+    if (ran.exitCode !== 0) failure = `exited ${ran.exitCode}: ${(ran.stderr || ran.stdout).trim().slice(0, 200)}`
   } catch (error) {
-    $.ui.log(`probe of ${account} failed: ${String(error).slice(0, 200)}`)
-    return false
+    failure = String(error).slice(0, 200)
   } finally {
     probing.delete(account)
     $.ui.status(undefined)
   }
+  if (failure === undefined) {
+    probeFailed.delete(account)
+    await $.process.run(['rm', '-f', probeMarkPath(account)], { timeoutMs: 5_000 })
+    await refreshSnapshot($)
+    return true
+  }
+  await $.fs.write(probeMarkPath(account), JSON.stringify({ failedAt: new Date(await $.clock.now()).toISOString() }) + '\n')
+  if (!probeFailed.has(account)) {
+    probeFailed.add(account)
+    $.ui.log(`probe of ${account} failed (${failure}); next try in ${Math.round(PROBE_RETRY_MS / 60_000)} min`)
+  }
+  return false
 }
 
-/** Probes every other registered account whose reading is missing or older than `maxAgeMs`, one at a time. */
-async function probeStale($: EngineInterface, maxAgeMs: number): Promise<void> {
+/** Probes every other registered account whose reading is due a refresh, one at a time. */
+async function probeStale($: EngineInterface, maxAgeMs: number, isForced = false): Promise<void> {
   if (identity.isProbe || !identity.isInteractive) return
   const nowMs = await $.clock.now()
   const snap = await read($, snapshot)
   const accounts = await read($, registry)
   for (const account of Object.keys(accounts)) {
     if (account === identity.me || accounts[account]?.enabled === false) continue
-    if (isStale(snap[account], nowMs, maxAgeMs)) await probe($, account)
+    if (isForced || isStale(snap[account], nowMs, maxAgeMs)) await probe($, account, isForced)
   }
 }
 
@@ -527,10 +559,10 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'quota-probe' }, async ($, e) => {
     const wanted = e.args.trim()
     if (wanted) {
-      const ok = await probe($, wanted)
+      const ok = await probe($, wanted, true)
       return { text: ok ? `Probed ${wanted}.` : `Could not probe ${wanted}.` }
     }
-    await probeStale($, 0)
+    await probeStale($, 0, true)
     return { text: 'Probed every other account.' }
   })
 
@@ -691,7 +723,7 @@ export const register: Register = (on, options) => {
               plain: true,
               dimColor: probing.size > 0,
               onPress: async () => {
-                await probeStale($, 0)
+                await probeStale($, 0, true)
               },
             }),
             Button({

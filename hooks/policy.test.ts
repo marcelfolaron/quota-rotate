@@ -7,10 +7,12 @@ import {
   clampThreshold,
   effectivePercent,
   formatReset,
+  isKnownFull,
   isStale,
   matchAccount,
   pickNext,
   probeArgv,
+  probeVerdict,
   rankCandidates,
 } from './policy'
 
@@ -131,17 +133,58 @@ describe('identity and formatting', () => {
     expect(isStale(fresh, NOW, 30_000)).toBe(true)
   })
 
-  test('a probe unsets the launcher variables and sets the config dir only for a non-default account', async () => {
-    const forWork = probeArgv('work', '/x/work', '/plug')
-    expect(forWork.slice(0, 1)).toEqual(['env'])
-    expect(forWork).toContain('-u')
-    expect(forWork).toContain('QUOTA_ROTATE_HANDOFF')
+  test('a probe is a process of its own: launcher and session variables unset, the config dir only for a non-default account', async () => {
+    const forWork = probeArgv('work', '/x/work', { pluginRoot: '/plug', claudeBin: '/bin/claude' })
+    expect(forWork[0]).toBe('env')
+    for (const name of ['CLAUDE_CONFIG_DIR', 'QUOTA_ROTATE_HANDOFF', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDECODE']) {
+      expect(forWork[forWork.indexOf(name) - 1]).toBe('-u')
+    }
     expect(forWork).toContain('CLAUDE_CONFIG_DIR=/x/work')
     expect(forWork).toContain('QUOTA_ROTATE_PROBE=1')
     expect(forWork).toContain('CLAUDE_CODE_PLUGIN_DIRS=/plug')
-    const forDefault = probeArgv('default', undefined, '/plug')
+    expect(forWork.indexOf('/bin/claude')).toBeGreaterThan(forWork.indexOf('CLAUDE_CODE_PLUGIN_DIRS=/plug'))
+    const forDefault = probeArgv('default', undefined)
     expect(forDefault.some(a => a.startsWith('CLAUDE_CONFIG_DIR='))).toBe(false)
+    expect(forDefault.some(a => a.startsWith('CLAUDE_CODE_PLUGIN_DIRS='))).toBe(false)
     expect(forDefault.indexOf('-p')).toBeGreaterThan(forDefault.indexOf('claude'))
+  })
+
+  test('a probe runs nothing but the one turn: no MCP server, no tool, no transcript, no wait at a limit', async () => {
+    const argv = probeArgv('work', '/x/work')
+    const tail = argv.slice(argv.indexOf('claude'))
+    expect(tail).toContain('--strict-mcp-config')
+    expect(tail[tail.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{}}')
+    expect(tail[tail.indexOf('--tools') + 1]).toBe('')
+    expect(tail).toContain('--no-session-persistence')
+    expect(tail[tail.indexOf('--settings') + 1]).toBe('{"autoContinueAtUsageLimit":false}')
+    expect(tail[tail.indexOf('--model') + 1]).toBe('haiku')
+  })
+
+  test('an account at 100 with its reset ahead is known full', async () => {
+    expect(isKnownFull(reading('a', { seven_day: { percentUsed: 100, resetsAt: LATER }, five_hour: { percentUsed: 0 } }), NOW)).toBe(true)
+    expect(isKnownFull(reading('a', { seven_day: { percentUsed: 100, resetsAt: EARLIER } }), NOW)).toBe(false)
+    expect(isKnownFull(reading('a', { seven_day: { percentUsed: 99, resetsAt: LATER } }), NOW)).toBe(false)
+    expect(isKnownFull(reading('a', { seven_day: { percentUsed: 100 } }), NOW)).toBe(false)
+    expect(isKnownFull(undefined, NOW)).toBe(false)
+  })
+
+  test('whether to probe: fresh, full and recently failed accounts wait; a running probe is never doubled', async () => {
+    const old = { ...reading('a', { five_hour: { percentUsed: 10, resetsAt: LATER } }), observedAt: new Date(NOW - 7 * 3_600_000).toISOString() }
+    const full = { ...old, windows: { seven_day: { percentUsed: 100, resetsAt: LATER } } }
+    const fresh = reading('a', { five_hour: { percentUsed: 10, resetsAt: LATER } })
+    const sixHours = 6 * 3_600_000
+    expect(probeVerdict(undefined, undefined, NOW, sixHours)).toBe('due')
+    expect(probeVerdict(old, undefined, NOW, sixHours)).toBe('due')
+    expect(probeVerdict(fresh, undefined, NOW, sixHours)).toBe('fresh')
+    expect(probeVerdict(full, undefined, NOW, sixHours)).toBe('full')
+    expect(probeVerdict(old, { failedAt: new Date(NOW - 10 * 60_000).toISOString() }, NOW, sixHours)).toBe('failed-recently')
+    expect(probeVerdict(old, { failedAt: new Date(NOW - 31 * 60_000).toISOString() }, NOW, sixHours)).toBe('due')
+    expect(probeVerdict(old, { startedAt: new Date(NOW - 60_000).toISOString() }, NOW, sixHours)).toBe('in-flight')
+    expect(probeVerdict(old, { startedAt: new Date(NOW - 4 * 60_000).toISOString() }, NOW, sixHours)).toBe('due')
+    // Asked for by a person: only a running probe stands in the way.
+    expect(probeVerdict(fresh, undefined, NOW, sixHours, true)).toBe('due')
+    expect(probeVerdict(full, { failedAt: EARLIER }, NOW, sixHours, true)).toBe('due')
+    expect(probeVerdict(old, { startedAt: new Date(NOW - 60_000).toISOString() }, NOW, sixHours, true)).toBe('in-flight')
   })
 
   test('clamps the threshold and formats resets', async () => {

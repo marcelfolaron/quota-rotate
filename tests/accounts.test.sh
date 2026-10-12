@@ -54,7 +54,9 @@ assert_contains "$out" "probing work… ok" &&
 assert_contains "$out" "probing default… ok" &&
 assert_contains "$(cat "$BASE/usage/work.json")" '"percentUsed":33' &&
 assert_contains "$(grep -A1 '\[-p\]' "$LOG" | grep ENV | head -1)" "CLAUDE_CONFIG_DIR=$BASE/work QUOTA_ROTATE_ACCOUNT=work QUOTA_ROTATE_HANDOFF=<unset> CLAUDE_CODE_PLUGIN_DIRS=$REPO QUOTA_ROTATE_PROBE=1" &&
-assert_contains "$(grep -A1 '\[-p\]' "$LOG" | grep ENV | tail -1)" "CLAUDE_CONFIG_DIR=<unset> QUOTA_ROTATE_ACCOUNT=default" && ok
+assert_contains "$(grep -A1 '\[-p\]' "$LOG" | grep ENV | tail -1)" "CLAUDE_CONFIG_DIR=<unset> QUOTA_ROTATE_ACCOUNT=default" &&
+assert_contains "$(grep '\[-p\]' "$LOG" | head -1)" "[--strict-mcp-config] [--mcp-config] [{\"mcpServers\":{}}] [--tools] [] [--no-session-persistence]" "probe flags" &&
+assert_contains "$(grep '\[-p\]' "$LOG" | head -1)" "[--settings] [{\"autoContinueAtUsageLimit\":false}]" "probe settings" && ok
 
 begin "probe of one account loads nothing extra when the plugin is installed"
 world
