@@ -70,6 +70,13 @@ claude_as() { # claude_as <name> <args...>
   fi
 }
 
+# What a claude the scripts start must not inherit from the session around them: its
+# config dir and plugin folders, the launcher's handoff, a token that outranks every
+# login, the session's own identity. Keep in step with PROBE_UNSET_VARS in hooks/policy.ts.
+CHILD_ENV_UNSET=(-u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_PLUGIN_DIRS -u QUOTA_ROTATE_HANDOFF -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY
+  -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_BRIDGE_SESSION_ID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN
+  -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_PLUGIN_DATA -u CLAUDE_PID -u CLAUDECODE)
+
 # One headless turn under <name> with the mod loaded, so that account's own mod
 # instance writes its reading. Nothing else runs: no MCP server, no tool, no
 # transcript, no wait at a usage limit. Quiet; the exit status says whether it ran.
@@ -80,9 +87,7 @@ probe_account() { # probe_account <name>
   [ "$name" = "default" ] || cfg=("CLAUDE_CONFIG_DIR=$BASE/$name")
   dirs="$(plugin_dirs_for_child)"
   [ -z "$dirs" ] || load=("CLAUDE_CODE_PLUGIN_DIRS=$dirs")
-  (cd "$HOME" && env -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_PLUGIN_DIRS -u QUOTA_ROTATE_HANDOFF -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY \
-      -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_BRIDGE_SESSION_ID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN \
-      -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_PLUGIN_DATA -u CLAUDE_PID -u CLAUDECODE \
+  (cd "$HOME" && env "${CHILD_ENV_UNSET[@]}" \
       ${cfg[@]+"${cfg[@]}"} ${load[@]+"${load[@]}"} QUOTA_ROTATE_ACCOUNT="$name" QUOTA_ROTATE_PROBE=1 \
       "$CLAUDE" -p "Reply with the single word ok." --model haiku --setting-sources user \
       --settings '{"autoContinueAtUsageLimit":false}' --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
@@ -92,4 +97,13 @@ probe_account() { # probe_account <name>
 registry_names() { # every enabled account, space separated
   [ -f "$REG" ] || return 0
   node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(Object.entries(r.accounts).filter(([,a])=>a.enabled!==false).map(([n])=>n).join(" "))' "$REG"
+}
+
+# Copies the primary login's MCP servers and per-project MCP switches into <name>'s own
+# .claude.json (scripts/sync-mcp.ts). "default" is that login, so there is nothing to do.
+# A line per change on stdout; the exit status says whether every write went through.
+sync_mcp() { # sync_mcp <name>
+  [ "$1" != "default" ] || return 0
+  env "${CHILD_ENV_UNSET[@]}" QUOTA_ROTATE_ACCOUNT="$1" \
+    node --disable-warning=ExperimentalWarning "$HERE/sync-mcp.ts" "$1" "$(config_dir_of "$1")" "$CLAUDE"
 }

@@ -65,15 +65,18 @@ install_fake_claude() {
 #   auth status [--json]  -> the status file of this config dir (exit 1 when none)
 #   auth login            -> writes that status file (a successful browser login)
 #   -p ...                -> a probe: writes the usage file of QUOTA_ROTATE_ACCOUNT
+#   mcp add-json|remove   -> edits this config dir's .claude.json like the real one (a command
+#                            without args gets args: []; local scope is keyed by the cwd);
+#                            FAKE_MCP_FAIL=1 makes it exit 1 instead
 #   anything else         -> an interactive launch: pops one line of $FAKE/scenario:
 #                            "handoff <to> <sid> <reason>" writes the handoff file
 #                            and exits 0; "exit <code>" exits with that code.
 dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 {
   printf 'ARGV:'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'
-  printf 'ENV: CLAUDE_CONFIG_DIR=%s QUOTA_ROTATE_ACCOUNT=%s QUOTA_ROTATE_HANDOFF=%s CLAUDE_CODE_PLUGIN_DIRS=%s QUOTA_ROTATE_PROBE=%s CLAUDE_CODE_OAUTH_TOKEN=%s ANTHROPIC_API_KEY=%s\n' \
+  printf 'ENV: CLAUDE_CONFIG_DIR=%s QUOTA_ROTATE_ACCOUNT=%s QUOTA_ROTATE_HANDOFF=%s CLAUDE_CODE_PLUGIN_DIRS=%s QUOTA_ROTATE_PROBE=%s CLAUDE_CODE_OAUTH_TOKEN=%s ANTHROPIC_API_KEY=%s CWD=%s\n' \
     "${CLAUDE_CONFIG_DIR-<unset>}" "${QUOTA_ROTATE_ACCOUNT-<unset>}" "${QUOTA_ROTATE_HANDOFF-<unset>}" \
-    "${CLAUDE_CODE_PLUGIN_DIRS-<unset>}" "${QUOTA_ROTATE_PROBE-<unset>}" "${CLAUDE_CODE_OAUTH_TOKEN-<unset>}" "${ANTHROPIC_API_KEY-<unset>}"
+    "${CLAUDE_CODE_PLUGIN_DIRS-<unset>}" "${QUOTA_ROTATE_PROBE-<unset>}" "${CLAUDE_CODE_OAUTH_TOKEN-<unset>}" "${ANTHROPIC_API_KEY-<unset>}" "$PWD"
 } >>"$FAKE_CLAUDE_DIR/calls.log"
 status_file="$FAKE_CLAUDE_DIR/status.$(printf '%s' "$dir" | tr '/' '_').json"
 case "${1:-}" in
@@ -92,6 +95,21 @@ case "${1:-}" in
     printf '{"version":1,"account":"%s","configDir":"%s","observedAt":"%s","windows":{"five_hour":{"percentUsed":%s}}}\n' \
       "$acct" "$dir" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${FAKE_PROBE_PERCENT:-10}" >"$QUOTA_ROTATE_BASE/usage/$acct.json"
     echo ok; exit 0 ;;
+  mcp)
+    [ -z "${FAKE_MCP_FAIL:-}" ] || exit 1
+    config="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}"
+    shift
+    node -e '
+      const fs = require("fs"); const [file, cwd, sub, name, ...rest] = process.argv.slice(1);
+      const scope = rest[rest.indexOf("-s") + 1];
+      const c = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+      const holder = scope === "user" ? c : ((c.projects ??= {})[cwd] ??= {});
+      holder.mcpServers ??= {};
+      if (sub === "remove") delete holder.mcpServers[name];
+      else { const s = JSON.parse(rest[0]); holder.mcpServers[name] = "command" in s && !("args" in s) ? { ...s, args: [] } : s; }
+      fs.writeFileSync(file, JSON.stringify(c, null, 2));
+    ' "${config:-$HOME/.claude.json}" "$PWD" "$@"
+    exit 0 ;;
 esac
 line=""
 if [ -f "$FAKE_CLAUDE_DIR/scenario" ]; then
@@ -127,10 +145,10 @@ register() { # register <name> [percent] : an enabled account with a config dir 
   fi
 }
 
-launch_n() { # launch_n <n>: the ARGV line of the n-th interactive launch (auth/probe calls excluded)
-  grep '^ARGV:' "$LOG" | grep -v '\[auth\]' | grep -v '\[-p\]' | sed -n "${1}p"
+launch_n() { # launch_n <n>: the ARGV line of the n-th interactive launch (auth/probe/mcp calls excluded)
+  grep '^ARGV:' "$LOG" | grep -v '\[auth\]' | grep -v '\[-p\]' | grep -v '^ARGV: \[mcp\]' | sed -n "${1}p"
 }
 env_n() { # env_n <n>: the ENV line of the n-th interactive launch
-  awk '/^ARGV:/ { keep = ($0 !~ /\[auth\]/ && $0 !~ /\[-p\]/) } /^ENV:/ && keep { n++; if (n == want) print }' want="$1" "$LOG"
+  awk '/^ARGV:/ { keep = ($0 !~ /\[auth\]/ && $0 !~ /\[-p\]/ && $0 !~ /^ARGV: \[mcp\]/) } /^ENV:/ && keep { n++; if (n == want) print }' want="$1" "$LOG"
 }
-launches() { grep '^ARGV:' "$LOG" | grep -vc '\[auth\]\|\[-p\]' || true; }
+launches() { grep '^ARGV:' "$LOG" | grep -v '^ARGV: \[mcp\]' | grep -vc '\[auth\]\|\[-p\]' || true; }

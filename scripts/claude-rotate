@@ -123,6 +123,9 @@ while :; do
     echo "claude-rotate: $account has no config dir at $dir; run quota-accounts add $account" >&2
     exit 1
   fi
+  # MCP servers live in each account's own .claude.json: bring the primary login's along.
+  sync_mcp "$account" | sed 's/^/claude-rotate: /' >&2 ||
+    echo "claude-rotate: not every MCP server reached $account; launching anyway" >&2
   rm -f "$handoff"
 
   echo "claude-rotate: launching as $account${session:+ (resuming $session)}" >&2

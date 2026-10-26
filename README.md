@@ -15,6 +15,8 @@ resumes it there.
   running agent, no background task.
 - **Probes.** An idle account's reading is refreshed with a one-line headless run, so a
   handoff never trusts a blank or stale number.
+- **MCP servers come along.** Each account keeps its own MCP configuration; before it
+  starts a session under an account, the launcher copies the default login's servers there.
 
 ## Requirements
 
@@ -96,6 +98,7 @@ pending switch is waiting for.
  wait until idle (turn, agents, tasks)
  toast, then SIGTERM to this process  ───► claude exits
                                            read the handoff, remove it
+                                           copy the MCP servers into "personal"
                                            claude --resume <sessionId>
                                              CLAUDE_CONFIG_DIR=~/.claude-accounts/personal
  session under "personal", same conversation
@@ -127,21 +130,53 @@ pending switch is waiting for.
   plugin-root            where the plugin lives right now, for the shims
   handoff.<pid>.json     one per running launcher, only during a handoff
   <name>/                a CLAUDE_CONFIG_DIR per extra account
+  <name>/.claude.json    that account's login state and MCP servers (Claude Code's file)
 ```
 
 Each extra account's directory holds its own login and little else: `projects/`,
 `plugins/`, `skills/`, `commands/`, `agents/`, `settings.json`, `CLAUDE.md` and
 `keybindings.json` are symlinks to `~/.claude`. Every account sees the same sessions,
 plugins and settings, which is also why an installed quota-rotate loads under every
-account without further setup.
+account without further setup. `.claude.json` is not shared: see
+[MCP servers](#mcp-servers).
 
 `default` is `~/.claude` itself, run with `CLAUDE_CONFIG_DIR` **unset**. On macOS the
 Keychain entry is keyed to the variable, so `CLAUDE_CONFIG_DIR=~/.claude` reads a
-different, empty entry and reports "Not logged in". The scripts handle this.
+different, empty entry and reports "Not logged in". The scripts handle this. Its
+`.claude.json` is `~/.claude.json`, beside the folder, not inside it.
 
 The mod attributes a session to an account by the launcher's `QUOTA_ROTATE_ACCOUNT`, else
 by the config directory, and then checks `claude auth status` against the registry's
 email and organization, so a manual `/login` is attributed correctly.
+
+## MCP servers
+
+Claude Code keeps MCP servers in each account's own `.claude.json`. That file also holds
+the account's login state, so it cannot be a symlink like the folders above. Instead the
+launcher copies the default login's MCP setup into an account before every launch under
+it, a handoff included; `quota-accounts add` does the same after the login, and
+`quota-accounts sync-mcp [name]` does it on demand (for a session started with plain
+`claude`, say).
+
+- **Servers** at user scope, and at local scope for each project folder that still exists.
+  A server missing from the account, or different there, is written with
+  `claude mcp add-json`. A server only the account has is kept.
+- **Per-project switches.** A server that `/mcp` disables in a project under `default` is
+  disabled in that project under the account too, and `default`'s `.mcp.json` approvals
+  and rejections replace the account's for the same servers. No command writes these, so
+  they go into the file under the lock Claude Code takes for it (`.claude.json.lock`),
+  from a fresh read inside it.
+
+Add servers under the default login (`claude mcp add` with `CLAUDE_CONFIG_DIR` unset, or in
+a `cr --account default` session): a server added under another account stays in that
+account. Nothing is ever removed from an account, so two changes do not travel: a server
+removed under `default`, and a server enabled again under `default` after it was disabled.
+Make those under each account too, for example
+`CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude mcp remove <server> -s user`.
+
+A session reads its servers when it starts, so a running one sees a new server after its
+next start. claude.ai connectors belong to each claude.ai account and are not copied. The
+output names servers and folders, never a server's settings: those carry tokens.
 
 ## Probes
 

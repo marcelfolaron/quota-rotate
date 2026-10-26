@@ -3,11 +3,14 @@
 #
 #   quota-accounts add <name>      create ~/.claude-accounts/<name>, share the
 #                                  primary's projects/plugins/skills/settings,
-#                                  then log that account in (browser)
+#                                  log that account in (browser), copy the MCP servers
 #   quota-accounts add default     register ~/.claude itself
 #   quota-accounts list            show accounts and their last reading
 #   quota-accounts refresh         re-read email/org of every account from its login
 #   quota-accounts probe [name]    one-line headless run per account so each writes its reading
+#   quota-accounts sync-mcp [name] copy the primary login's MCP servers and switches into
+#                                  the account, or every account (the launcher does this
+#                                  before each launch)
 #   quota-accounts remove <name>   forget it (keeps the directory)
 set -euo pipefail
 
@@ -17,7 +20,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHARED=(projects plugins skills commands agents settings.json CLAUDE.md keybindings.json)
 
 usage() {
-  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -74,6 +77,23 @@ case "$1" in
     write_registry "$name" "$dir" "$status"
     echo "Registered '$name' -> $dir"
     node -e 'const s=JSON.parse(process.argv[1]); console.log("  " + [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · "))' "$status"
+    sync_mcp "$name" || echo "not every MCP server reached '$name'; run: quota-accounts sync-mcp $name" >&2
+    ;;
+  sync-mcp)
+    names="${2:-}"
+    [ -n "$names" ] || names="$(registry_names)"
+    failed=0
+    for name in $names; do
+      if [ "$name" = "default" ]; then echo "default: the source of the copy, nothing to do"; continue; fi
+      if [ ! -d "$(config_dir_of "$name")" ]; then
+        echo "$name: no config dir; run quota-accounts add $name" >&2
+        failed=1
+        continue
+      fi
+      out="$(sync_mcp "$name")" || failed=1
+      if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "$name: MCP servers already in step"; fi
+    done
+    exit "$failed"
     ;;
   probe)
     names="${2:-}"
