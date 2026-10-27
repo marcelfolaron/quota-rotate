@@ -8,9 +8,9 @@
 #   quota-accounts list            show accounts and their last reading
 #   quota-accounts refresh         re-read email/org of every account from its login
 #   quota-accounts probe [name]    one-line headless run per account so each writes its reading
-#   quota-accounts sync-mcp [name] copy the primary login's MCP servers and switches into
-#                                  the account, or every account (the launcher does this
-#                                  before each launch)
+#   quota-accounts sync-mcp [name] bring the account's MCP servers and switches in step
+#                                  with the primary login's, or every account's (the
+#                                  launcher does this before each launch)
 #   quota-accounts remove <name>   forget it (keeps the directory)
 set -euo pipefail
 
@@ -77,7 +77,7 @@ case "$1" in
     write_registry "$name" "$dir" "$status"
     echo "Registered '$name' -> $dir"
     node -e 'const s=JSON.parse(process.argv[1]); console.log("  " + [s.email, s.orgName, s.subscriptionType].filter(Boolean).join(" · "))' "$status"
-    sync_mcp "$name" || echo "not every MCP server reached '$name'; run: quota-accounts sync-mcp $name" >&2
+    sync_mcp "$name" || echo "not every MCP change reached '$name'; run: quota-accounts sync-mcp $name" >&2
     ;;
   sync-mcp)
     names="${2:-}"

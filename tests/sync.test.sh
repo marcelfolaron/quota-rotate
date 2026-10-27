@@ -39,6 +39,7 @@ setup() {
     };"
   register work 10
   ACCOUNT_FILE="$BASE/work/.claude.json"
+  RECORD="$BASE/mcp-sync/work.json"
   json "$ACCOUNT_FILE" "
     c.oauthAccount = { emailAddress: 'work@example.com' };
     c.mcpServers = { mine: { command: '/bin/mine', args: [] } };"
@@ -136,6 +137,95 @@ out="$(FAKE_MCP_FAIL=1 bash "$ACCOUNTS" sync-mcp work 2>&1)"; status=$?
 assert_eq 1 "$status" "exit status" &&
 assert_contains "$out" "could not add MCP server grafana (user scope): claude exited 1" && ok
 
+begin "the record names what came from the primary, never a server's settings, and is private"
+setup
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+mode="$(node -e 'console.log((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$RECORD")"
+assert_eq "{\"version\":1,\"mcpServers\":[\"grafana\",\"web\"],\"projects\":{\"$PROJ\":{\"disabledMcpServers\":[\"web\"],\"mcpServers\":[\"pw\"]}}}" \
+  "$(get "$RECORD" 'c')" "record" &&
+assert_not_contains "$(cat "$RECORD")" "sekret" "record" &&
+assert_eq 600 "$mode" "record mode" && ok
+
+begin "a server removed under default is removed from the account; one only the account has stays"
+setup
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+json "$HOME/.claude.json" "delete c.mcpServers.grafana"
+out="$(bash "$ACCOUNTS" sync-mcp work 2>&1)"; status=$?
+assert_eq 0 "$status" "exit status" &&
+assert_contains "$(grep -A1 '^ARGV: \[mcp\] \[remove\] \[grafana\]' "$LOG")" "[-s] [user]" "remove scope" &&
+assert_contains "$(grep -A1 '^ARGV: \[mcp\] \[remove\] \[grafana\]' "$LOG")" "CLAUDE_CONFIG_DIR=$BASE/work " "remove env" &&
+assert_eq '["mine","web"]' "$(get "$ACCOUNT_FILE" 'Object.keys(c.mcpServers).sort()')" "user servers" &&
+assert_eq '["web"]' "$(get "$RECORD" 'c.mcpServers')" "record" &&
+assert_eq "work: removed MCP server grafana (user scope): default no longer has it" "$out" &&
+out="$(bash "$ACCOUNTS" sync-mcp work 2>&1)" &&
+assert_eq "work: MCP servers already in step" "$out" "next sync" && ok
+
+begin "a local server removed under default is removed from its folder"
+setup
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+json "$HOME/.claude.json" "delete c.projects['$PROJ'].mcpServers.pw"
+out="$(bash "$ACCOUNTS" sync-mcp work 2>&1)"
+assert_contains "$(grep '^ARGV: \[mcp\] \[remove\] \[pw\]' "$LOG")" "[-s] [local]" "remove scope" &&
+assert_contains "$(grep -A1 '^ARGV: \[mcp\] \[remove\] \[pw\]' "$LOG")" "CWD=$PROJ" "remove cwd" &&
+assert_eq '{}' "$(get "$ACCOUNT_FILE" "c.projects['$PROJ'].mcpServers")" "local servers" &&
+assert_contains "$out" "removed MCP server pw (local scope, $PROJ): default no longer has it" && ok
+
+begin "without a record (an account synced before it existed) nothing is removed, and the record starts"
+setup
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+rm "$RECORD"
+json "$HOME/.claude.json" "delete c.mcpServers.web"
+out="$(bash "$ACCOUNTS" sync-mcp work 2>&1)"
+assert_eq "work: MCP servers already in step" "$out" "first sync" &&
+assert_eq '["grafana","mine","web"]' "$(get "$ACCOUNT_FILE" 'Object.keys(c.mcpServers).sort()')" "web kept" &&
+assert_eq '["grafana"]' "$(get "$RECORD" 'c.mcpServers')" "record" &&
+json "$HOME/.claude.json" "delete c.mcpServers.grafana" &&
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+assert_eq '["mine","web"]' "$(get "$ACCOUNT_FILE" 'Object.keys(c.mcpServers).sort()')" "grafana removed after" && ok
+
+begin "a removal that fails stays in the record and goes through at the next sync"
+setup
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+json "$HOME/.claude.json" "delete c.mcpServers.grafana"
+out="$(FAKE_MCP_FAIL=1 bash "$ACCOUNTS" sync-mcp work 2>&1)"; status=$?
+assert_eq 1 "$status" "exit status" &&
+assert_contains "$out" "could not remove MCP server grafana (user scope): claude exited 1" &&
+assert_eq '["grafana","web"]' "$(get "$RECORD" 'c.mcpServers')" "record after the failure" &&
+out="$(bash "$ACCOUNTS" sync-mcp work 2>&1)" &&
+assert_contains "$out" "removed MCP server grafana (user scope)" &&
+assert_eq '["mine","web"]' "$(get "$ACCOUNT_FILE" 'Object.keys(c.mcpServers).sort()')" "user servers" && ok
+
+begin "switches: a server enabled again under default is enabled again; the account's own disable stays"
+setup
+json "$ACCOUNT_FILE" "c.projects = { '$PROJ': { disabledMcpServers: ['claude.ai Gmail'] } }"
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+json "$HOME/.claude.json" "c.projects['$PROJ'].disabledMcpServers = []"
+out="$(bash "$ACCOUNTS" sync-mcp work 2>&1)"
+assert_eq '["claude.ai Gmail"]' "$(get "$ACCOUNT_FILE" "c.projects['$PROJ'].disabledMcpServers")" "disabled" &&
+assert_contains "$out" "set disabledMcpServers in $PROJ: claude.ai Gmail" &&
+assert_eq 'null' "$(get "$RECORD" "c.projects['$PROJ'].disabledMcpServers ?? null")" "record" && ok
+
+begin "switches: a .mcp.json approval withdrawn under default is withdrawn from the account"
+setup
+json "$HOME/.claude.json" "c.projects['$PROJ'].enabledMcpjsonServers = ['db']"
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+json "$HOME/.claude.json" "delete c.projects['$PROJ'].enabledMcpjsonServers"
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+assert_eq '[]' "$(get "$ACCOUNT_FILE" "c.projects['$PROJ'].enabledMcpjsonServers")" "approved" && ok
+
+begin "switches: an enable that meets a held lock waits for the next sync"
+setup
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+json "$HOME/.claude.json" "c.projects['$PROJ'].disabledMcpServers = []"
+mkdir "$ACCOUNT_FILE.lock"
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1; status=$?
+assert_eq 1 "$status" "exit status while held" &&
+assert_eq '["web"]' "$(get "$ACCOUNT_FILE" "c.projects['$PROJ'].disabledMcpServers")" "not written while held" &&
+assert_eq '["web"]' "$(get "$RECORD" "c.projects['$PROJ'].disabledMcpServers")" "record while held" &&
+rmdir "$ACCOUNT_FILE.lock" &&
+bash "$ACCOUNTS" sync-mcp work >/dev/null 2>&1
+assert_eq '[]' "$(get "$ACCOUNT_FILE" "c.projects['$PROJ'].disabledMcpServers")" "written once free" && ok
+
 begin "the launcher syncs the account before launching it, and the next one after a handoff"
 setup
 register default 90; register personal 5
@@ -161,7 +251,7 @@ scenario "exit 0"
 out="$(FAKE_MCP_FAIL=1 bash "$ROTATE" --account work 2>&1)"; status=$?
 assert_eq 0 "$status" "exit status" &&
 assert_eq 1 "$(launches)" "launches" &&
-assert_contains "$out" "not every MCP server reached work; launching anyway" && ok
+assert_contains "$out" "not every MCP change reached work; launching anyway" && ok
 
 begin "the default account launches without a sync"
 setup

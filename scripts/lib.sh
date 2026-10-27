@@ -99,11 +99,12 @@ registry_names() { # every enabled account, space separated
   node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(Object.entries(r.accounts).filter(([,a])=>a.enabled!==false).map(([n])=>n).join(" "))' "$REG"
 }
 
-# Copies the primary login's MCP servers and per-project MCP switches into <name>'s own
-# .claude.json (scripts/sync-mcp.ts). "default" is that login, so there is nothing to do.
+# Brings <name>'s own .claude.json in step with the primary login's MCP servers and
+# per-project MCP switches (scripts/sync-mcp.ts); mcp-sync/<name>.json records which names
+# came from the primary. "default" is that login, so there is nothing to do.
 # A line per change on stdout; the exit status says whether every write went through.
 sync_mcp() { # sync_mcp <name>
   [ "$1" != "default" ] || return 0
   env "${CHILD_ENV_UNSET[@]}" QUOTA_ROTATE_ACCOUNT="$1" \
-    node --disable-warning=ExperimentalWarning "$HERE/sync-mcp.ts" "$1" "$(config_dir_of "$1")" "$CLAUDE"
+    node --disable-warning=ExperimentalWarning "$HERE/sync-mcp.ts" "$1" "$(config_dir_of "$1")" "$CLAUDE" "$BASE/mcp-sync/$1.json"
 }

@@ -16,7 +16,8 @@ resumes it there.
 - **Probes.** An idle account's reading is refreshed with a one-line headless run, so a
   handoff never trusts a blank or stale number.
 - **MCP servers come along.** Each account keeps its own MCP configuration; before it
-  starts a session under an account, the launcher copies the default login's servers there.
+  starts a session under an account, the launcher brings it in step with the default
+  login's: a server added there is copied, a server removed there is removed.
 
 ## Requirements
 
@@ -98,7 +99,7 @@ pending switch is waiting for.
  wait until idle (turn, agents, tasks)
  toast, then SIGTERM to this process  ───► claude exits
                                            read the handoff, remove it
-                                           copy the MCP servers into "personal"
+                                           sync the MCP servers into "personal"
                                            claude --resume <sessionId>
                                              CLAUDE_CONFIG_DIR=~/.claude-accounts/personal
  session under "personal", same conversation
@@ -127,6 +128,7 @@ pending switch is waiting for.
 ~/.claude-accounts/
   accounts.json          registry: name -> configDir, email, orgId, orgName, enabled
   usage/<name>.json      last reading per account, written by that account's mod
+  mcp-sync/<name>.json   the MCP server and switch names that account got from default
   plugin-root            where the plugin lives right now, for the shims
   handoff.<pid>.json     one per running launcher, only during a handoff
   <name>/                a CLAUDE_CONFIG_DIR per extra account
@@ -153,26 +155,33 @@ email and organization, so a manual `/login` is attributed correctly.
 
 Claude Code keeps MCP servers in each account's own `.claude.json`. That file also holds
 the account's login state, so it cannot be a symlink like the folders above. Instead the
-launcher copies the default login's MCP setup into an account before every launch under
-it, a handoff included; `quota-accounts add` does the same after the login, and
+launcher brings an account in step with the default login's MCP setup before every launch
+under it, a handoff included; `quota-accounts add` does the same after the login, and
 `quota-accounts sync-mcp [name]` does it on demand (for a session started with plain
 `claude`, say).
 
 - **Servers** at user scope, and at local scope for each project folder that still exists.
   A server missing from the account, or different there, is written with
-  `claude mcp add-json`. A server only the account has is kept.
+  `claude mcp add-json`. A server that came from `default` and is gone from it now is
+  removed with `claude mcp remove`. A server only the account has is kept.
 - **Per-project switches.** A server that `/mcp` disables in a project under `default` is
-  disabled in that project under the account too, and `default`'s `.mcp.json` approvals
-  and rejections replace the account's for the same servers. No command writes these, so
-  they go into the file under the lock Claude Code takes for it (`.claude.json.lock`),
-  from a fresh read inside it.
+  disabled in that project under the account too, and enabled again when `default`
+  enables it again. `default`'s `.mcp.json` approvals and rejections replace the account's
+  for the same servers, and one that `default` withdraws is withdrawn there too. No
+  command writes these, so they go into the file under the lock Claude Code takes for it
+  (`.claude.json.lock`), from a fresh read inside it.
 
-Add servers under the default login (`claude mcp add` with `CLAUDE_CONFIG_DIR` unset, or in
-a `cr --account default` session): a server added under another account stays in that
-account. Nothing is ever removed from an account, so two changes do not travel: a server
-removed under `default`, and a server enabled again under `default` after it was disabled.
-Make those under each account too, for example
-`CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude mcp remove <server> -s user`.
+`mcp-sync/<name>.json` records which names the account got from `default`: the ones
+`default` has now, and earlier ones the account still has, so a removal that failed is
+tried again at the next launch. It holds names only, never a server's settings. An
+account's first sync under 0.3.0 starts the record and removes nothing: a server removed
+under `default` before then stays in the account until you remove it there once, for
+example `CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude mcp remove <server> -s user`.
+
+Make changes under the default login (`claude mcp add` with `CLAUDE_CONFIG_DIR` unset, or
+in a `cr --account default` session). A server added under another account stays in that
+account only, and one removed there comes back at its next launch while `default` still
+has it.
 
 A session reads its servers when it starts, so a running one sees a new server after its
 next start. claude.ai connectors belong to each claude.ai account and are not copied. The

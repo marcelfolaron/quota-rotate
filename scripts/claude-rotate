@@ -125,7 +125,7 @@ while :; do
   fi
   # MCP servers live in each account's own .claude.json: bring the primary login's along.
   sync_mcp "$account" | sed 's/^/claude-rotate: /' >&2 ||
-    echo "claude-rotate: not every MCP server reached $account; launching anyway" >&2
+    echo "claude-rotate: not every MCP change reached $account; launching anyway" >&2
   rm -f "$handoff"
 
   echo "claude-rotate: launching as $account${session:+ (resuming $session)}" >&2
