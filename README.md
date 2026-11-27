@@ -159,7 +159,8 @@ The first check merges that folder into `~/.claude` and keeps it beside the new 
 - `file-history/` and `plans/`: the union. Where both have a file, the one written last
   stays. That happens: before the folder was shared, a session that moved could write a
   second, different file version under a name it had already used under another account.
-  The older one remains in the kept folder only.
+  An older one from the account remains in its kept folder. An older one in `~/.claude`
+  is replaced and not kept: copy `~/.claude/file-history` first if you want it.
 
 The merge copies file by file, so the first launch after an upgrade can take a while
 (about 20 seconds for 12,000 file versions). On a terminal it says how far it is on
