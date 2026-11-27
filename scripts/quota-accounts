@@ -2,7 +2,8 @@
 # quota-accounts: register the Claude accounts claude-rotate can launch under.
 #
 #   quota-accounts add <name>      create ~/.claude-accounts/<name>, share the
-#                                  primary's projects/plugins/skills/settings,
+#                                  primary's projects/plugins/skills/settings and
+#                                  session state (tasks, file history, plans),
 #                                  log that account in (browser), copy the MCP servers
 #   quota-accounts add default     register ~/.claude itself
 #   quota-accounts list            show accounts and their last reading
@@ -11,16 +12,20 @@
 #   quota-accounts sync-mcp [name] bring the account's MCP servers and switches in step
 #                                  with the primary login's, or every account's (the
 #                                  launcher does this before each launch)
+#   quota-accounts sync-shared [name]
+#                                  link what the account shares to the primary's, merging
+#                                  a tasks/file-history/plans folder of its own in first,
+#                                  or every account's (the launcher does this too)
 #   quota-accounts remove <name>   forget it (keeps the directory)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
-SHARED=(projects plugins skills commands agents settings.json CLAUDE.md keybindings.json)
+trap share_unlock EXIT
 
 usage() {
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -61,11 +66,8 @@ case "$1" in
     dir="$(config_dir_of "$name")"
     if [ "$name" != "default" ]; then
       mkdir -p "$dir"
-      for item in "${SHARED[@]}"; do
-        if [ -e "$PRIMARY/$item" ] && [ ! -e "$dir/$item" ]; then
-          ln -s "$PRIMARY/$item" "$dir/$item"
-        fi
-      done
+      sync_shared "$name" >/dev/null ||
+        echo "not everything could be shared with '$name'; run: quota-accounts sync-shared $name" >&2
     fi
     if claude_as "$name" auth status >/dev/null 2>&1; then
       echo "'$name' is already logged in at $dir; keeping that login (run 'claude auth logout' there to change it)"
@@ -92,6 +94,22 @@ case "$1" in
       fi
       out="$(sync_mcp "$name")" || failed=1
       if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "$name: MCP servers already in step"; fi
+    done
+    exit "$failed"
+    ;;
+  sync-shared)
+    names="${2:-}"
+    [ -n "$names" ] || names="$(registry_names)"
+    failed=0
+    for name in $names; do
+      if [ "$name" = "default" ]; then echo "default: what the others link to, nothing to do"; continue; fi
+      if [ ! -d "$(config_dir_of "$name")" ]; then
+        echo "$name: no config dir; run quota-accounts add $name" >&2
+        failed=1
+        continue
+      fi
+      out="$(SHARE_VERBOSE=1 sync_shared "$name")" || failed=1
+      if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "$name: shares everything already"; fi
     done
     exit "$failed"
     ;;
