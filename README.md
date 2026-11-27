@@ -99,6 +99,7 @@ pending switch is waiting for.
  wait until idle (turn, agents, tasks)
  toast, then SIGTERM to this process  ───► claude exits
                                            read the handoff, remove it
+                                           link every account's shared folders
                                            sync the MCP servers into "personal"
                                            claude --resume <sessionId>
                                              CLAUDE_CONFIG_DIR=~/.claude-accounts/personal
@@ -136,11 +137,33 @@ pending switch is waiting for.
 ```
 
 Each extra account's directory holds its own login and little else: `projects/`,
-`plugins/`, `skills/`, `commands/`, `agents/`, `settings.json`, `CLAUDE.md` and
-`keybindings.json` are symlinks to `~/.claude`. Every account sees the same sessions,
-plugins and settings, which is also why an installed quota-rotate loads under every
-account without further setup. `.claude.json` is not shared: see
-[MCP servers](#mcp-servers).
+`plugins/`, `skills/`, `commands/`, `agents/`, `settings.json`, `CLAUDE.md`,
+`keybindings.json`, `tasks/`, `file-history/` and `plans/` are symlinks to `~/.claude`.
+Every account sees the same sessions, plugins and settings, which is also why an
+installed quota-rotate loads under every account without further setup. `.claude.json`
+is not shared: see [MCP servers](#mcp-servers).
+
+The links are checked for every registered account before each launch, and by
+`quota-accounts sync-shared`. An entry that appears in `~/.claude` later (a first
+`commands/`, say) therefore reaches the accounts that were added before it.
+
+`tasks/`, `file-history/` and `plans/` are the session's own state. A session that moves
+to another account resumes the same conversation, and it has to find the same task list
+and the same file versions there. Claude Code creates these three folders by itself, so
+an account can hold a real one of its own, and every account added before 0.4.0 does.
+The first check merges that folder into `~/.claude` and keeps it beside the new link as
+`<folder>.before-share-<time>`:
+
+- `tasks/`: per task list, the one written last wins whole. Its numbered files only
+  make sense together.
+- `file-history/` and `plans/`: the union. Where both have a file, the one written last
+  stays. That happens: before the folder was shared, a session that moved could write a
+  second, different file version under a name it had already used under another account.
+  The older one remains in the kept folder only.
+
+Delete the kept folders once you are satisfied. Anything else an account has under a
+shared name (its own `commands/`, a link that points elsewhere) is left alone;
+`quota-accounts sync-shared` lists it.
 
 `default` is `~/.claude` itself, run with `CLAUDE_CONFIG_DIR` **unset**. On macOS the
 Keychain entry is keyed to the variable, so `CLAUDE_CONFIG_DIR=~/.claude` reads a
@@ -217,6 +240,10 @@ usage limit; it fails instead.
 - **Resuming with background agents.** If the session had background agents or tasks when
   it moved (a rate-limit handoff does not wait for them), Claude Code asks on resume
   whether to restart them. Answer the prompt and the session continues.
+- **A merge under a running session.** The first check after an upgrade can merge an
+  account's `tasks/` or `file-history/` while a session runs under that account. What
+  the session writes afterwards goes through the link. A write that lands between the
+  copy and the link stays in the kept `before-share` folder.
 - **Readings age.** Between probes an idle account's reading can be up to six hours old;
   the pane colors the age when it is. A window whose reset time has passed counts as 0.
 - **Task status is as fresh as the last turn.** The list of background tasks comes from

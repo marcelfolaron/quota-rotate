@@ -123,6 +123,10 @@ while :; do
     echo "claude-rotate: $account has no config dir at $dir; run quota-accounts add $account" >&2
     exit 1
   fi
+  # Task lists, file history and plans are kept per config dir: every account reads the
+  # primary's, so a session finds them again whichever account it moves to.
+  sync_shared_all | sed 's/^/claude-rotate: /' >&2 ||
+    echo "claude-rotate: not every shared folder could be linked; launching anyway" >&2
   # MCP servers live in each account's own .claude.json: bring the primary login's along.
   sync_mcp "$account" | sed 's/^/claude-rotate: /' >&2 ||
     echo "claude-rotate: not every MCP change reached $account; launching anyway" >&2
