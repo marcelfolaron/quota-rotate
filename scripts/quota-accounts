@@ -22,6 +22,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
+trap share_unlock EXIT
+
 usage() {
   sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 }

@@ -161,6 +161,13 @@ The first check merges that folder into `~/.claude` and keeps it beside the new 
   second, different file version under a name it had already used under another account.
   The older one remains in the kept folder only.
 
+The merge copies file by file, so the first launch after an upgrade can take a while
+(about 20 seconds for 12,000 file versions). On a terminal it says how far it is on
+one line, and that line goes away when it is done. Launchers started at the same moment,
+as when a terminal reopens its tabs, wait for the one that merges and say so; a lock
+left by a launcher that was killed is taken over after two minutes. To do the merge
+before the next launch, run `quota-accounts sync-shared` once.
+
 Delete the kept folders once you are satisfied. Anything else an account has under a
 shared name (its own `commands/`, a link that points elsewhere) is left alone;
 `quota-accounts sync-shared` lists it.

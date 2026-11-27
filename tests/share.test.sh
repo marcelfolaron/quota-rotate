@@ -102,4 +102,55 @@ out="$(bash "$ROTATE" 2>&1 >/dev/null)"
 assert_not_contains "$out" "shared" &&
 assert_not_contains "$out" "merged" && ok
 
+begin "a merge says how far it is on a terminal, and nothing when it is not one"
+world; register work
+mkdir -p "$BASE/work/file-history/sid-1"
+for i in 1 2 3; do echo x >"$BASE/work/file-history/sid-1/f$i@v1"; done
+out="$(SHARE_PROGRESS=1 bash "$ACCOUNTS" sync-shared work 2>&1)"
+world; register work
+mkdir -p "$BASE/work/file-history/sid-1"; echo x >"$BASE/work/file-history/sid-1/f1@v1"
+quiet="$(bash "$ACCOUNTS" sync-shared work 2>&1)"
+assert_contains "$out" "sharing work's file-history, once: 0 of 3 files" &&
+assert_contains "$out" "work: merged its own file-history into default's and shares it now" &&
+assert_not_contains "$quiet" "of 1 files" &&
+assert_contains "$quiet" "work: merged its own file-history into default's and shares it now" && ok
+
+begin "a lock left by a launcher that is gone is taken over"
+world; register work
+mkdir "$BASE/.share.lock"; touch -t 202601010000 "$BASE/.share.lock"
+bash "$ACCOUNTS" sync-shared work >/dev/null 2>&1; status=$?
+assert_eq 0 "$status" "exit status" &&
+assert_eq "$HOME/.claude/tasks" "$(readlink "$BASE/work/tasks")" "tasks symlink" &&
+assert_no_file "$BASE/.share.lock" && ok
+
+begin "a sync waits while another holds the lock, then goes on"
+world; register work
+mkdir "$BASE/.share.lock"
+bash "$ACCOUNTS" sync-shared work >"$WORLD/waiter.out" 2>&1 &
+waiter=$!
+sleep 2
+held="$(readlink "$BASE/work/tasks" 2>/dev/null || true)"
+rmdir "$BASE/.share.lock"
+wait "$waiter"; status=$?
+assert_eq "" "$held" "nothing linked while the lock was held" &&
+assert_eq 0 "$status" "exit status" &&
+assert_eq "$HOME/.claude/tasks" "$(readlink "$BASE/work/tasks")" "tasks symlink afterwards" &&
+assert_no_file "$BASE/.share.lock" && ok
+
+begin "two syncs at once merge an account's folder once"
+world; register work
+mkdir -p "$BASE/work/file-history/sid-1" "$BASE/work/tasks/list-1"
+for i in $(seq 1 300); do echo "$i" >"$BASE/work/file-history/sid-1/f$i@v1"; done
+echo work >"$BASE/work/tasks/list-1/1.json"
+bash "$ACCOUNTS" sync-shared work >"$WORLD/a.out" 2>&1 & a=$!
+bash "$ACCOUNTS" sync-shared work >"$WORLD/b.out" 2>&1 & b=$!
+wait "$a"; sa=$?; wait "$b"; sb=$?
+assert_eq "0 0" "$sa $sb" "exit statuses" &&
+assert_eq 300 "$(ls "$HOME/.claude/file-history/sid-1" | wc -l | tr -d ' ')" "files in the primary" &&
+assert_eq 1 "$(ls -d "$BASE/work"/file-history.before-share-* | wc -l | tr -d ' ')" "kept file-history folders" &&
+assert_eq 1 "$(ls -d "$BASE/work"/tasks.before-share-* | wc -l | tr -d ' ')" "kept tasks folders" &&
+assert_eq "" "$(readlink "$BASE/work"/file-history.before-share-* 2>/dev/null || true)" "the kept folder is a real folder" &&
+assert_eq 1 "$(cat "$WORLD/a.out" "$WORLD/b.out" | grep -c 'merged its own file-history')" "merges reported" &&
+assert_eq "$HOME/.claude/file-history" "$(readlink "$BASE/work/file-history")" "file-history symlink" && ok
+
 finish
